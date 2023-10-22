@@ -82,6 +82,12 @@ class StmtVisitor:
         raise NotImplementedError()
 
 
+@dataclass
+class Program:
+    args: list[str]
+    body: list[Stmt]
+
+
 class ExprTranslator(ExprVisitor):
     def __init__(self, variables: "Variables", buffer: StringIO):
         self._variables = variables
@@ -113,8 +119,8 @@ class ExprTranslator(ExprVisitor):
 
 
 class Translator(StmtVisitor):
-    def __init__(self, variables: "Variables", buffer: StringIO):
-        self._offset = 0
+    def __init__(self, spill: int, variables: "Variables", buffer: StringIO):
+        self._offset = -spill
         self._variables = variables
         self._buffer = buffer
         self._expr_translator = ExprTranslator(variables, buffer)
@@ -151,10 +157,50 @@ class Variables:
         return self._offsets[name]
 
 
-Program = list[Stmt]
+class CallingConvention:
+    def get_register(self, index: int) -> str | None:
+        raise NotImplementedError()
+
+    def get_offset(self, index: int) -> int:
+        raise NotImplementedError()
+
+    def alloc_spill(self, count: int) -> int:
+        raise NotImplementedError()
 
 
-def translate(program: Program) -> str:
+class MicrosoftX64(CallingConvention):
+    def get_register(self, index: int) -> str | None:
+        if index >= 4:
+            return None
+        return ["%rcx", "%rdx", "%r8", "%r9"][index]
+
+    def get_offset(self, index: int) -> int:
+        return 8 * index + 16
+
+    def alloc_spill(self, count: int) -> int:
+        return 0
+
+
+class SysVAMD64(CallingConvention):
+    def get_register(self, index: int) -> str | None:
+        if index >= 6:
+            return None
+        return ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"][index]
+
+    def get_offset(self, index: int) -> int:
+        if index >= 6:
+            return 8 * (index - 6) + 16
+        return -8 * index - 8
+
+    def alloc_spill(self, count: int) -> int:
+        if count > 6:
+            return 8 * (count - 6)
+        return 0
+
+
+def translate(
+        program: Program,
+        convention: CallingConvention = MicrosoftX64()) -> str:
     buffer = StringIO()
     buffer.write(".global _fn\n\n")
     buffer.write(".section .text\n")
@@ -163,9 +209,21 @@ def translate(program: Program) -> str:
     buffer.write("    pushq   %rbp\n")
     buffer.write("    movq    %rsp, %rbp\n")
 
+    spill = convention.alloc_spill(len(program.args))
+    if spill != 0:
+        buffer.write("    subq    ${spill}, %rsp\n")
+
     variables = Variables()
-    translator = Translator(variables, buffer)
-    for stmt in program:
+
+    for i, name in enumerate(program.args):
+        offset = convention.get_offset(i)
+        variables.define_var(name, offset)
+        reg = convention.get_register(i)
+        if reg is not None:
+            buffer.write(f"    movq    {reg}, {offset}(%rbp)\n")
+
+    translator = Translator(spill, variables, buffer)
+    for stmt in program.body:
         stmt.accept(translator)
 
     return buffer.getvalue()
