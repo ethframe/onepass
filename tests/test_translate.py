@@ -4,19 +4,19 @@ import subprocess
 from onepass import BinOp, BinOpKind, Int, translate
 
 TEST_CASES = [
-    ([Int(1)], 1),
-    ([Int(5), Int(2), BinOp(BinOpKind.add)], 7),
-    ([Int(5), Int(2), BinOp(BinOpKind.sub)], 3),
-    ([Int(5), Int(2), BinOp(BinOpKind.mul)], 10),
-    ([Int(5), Int(2), BinOp(BinOpKind.div)], 2),
-    ([Int(1), Int(1), BinOp(BinOpKind.add), Int(1), BinOp(BinOpKind.add)], 3),
-    ([Int(1), Int(1), Int(1), BinOp(BinOpKind.add), BinOp(BinOpKind.add)], 3),
+    (Int(1), 1),
+    (BinOp(BinOpKind.add, Int(5), Int(2)), 7),
+    (BinOp(BinOpKind.sub, Int(5), Int(2)), 3),
+    (BinOp(BinOpKind.mul, Int(5), Int(2)), 10),
+    (BinOp(BinOpKind.div, Int(5), Int(2)), 2),
+    (BinOp(BinOpKind.add, BinOp(BinOpKind.add, Int(1), Int(1)), Int(1)), 3),
+    (BinOp(BinOpKind.add, Int(1), BinOp(BinOpKind.add, Int(1), Int(1))), 3),
 ]
 
 
-@pytest.fixture(scope="function")
-def main(tmpdir):
-    main = tmpdir.join("main.c")
+@ pytest.fixture(scope="session")
+def main(tmpdir_factory):
+    main = tmpdir_factory.mktemp("main").join("main.c")
     main.write(r""" \
 #include <stdio.h>
 #include <stdint.h>

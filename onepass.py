@@ -3,16 +3,16 @@ from enum import Enum
 from io import StringIO
 
 
-class Insn:
-    def accept(self, visitor: "InsnVisitor") -> None:
+class Expr:
+    def accept(self, visitor: "ExprVisitor") -> None:
         raise NotImplementedError()
 
 
 @dataclass
-class Int(Insn):
+class Int(Expr):
     value: int
 
-    def accept(self, visitor: "InsnVisitor") -> None:
+    def accept(self, visitor: "ExprVisitor") -> None:
         visitor.visit_int(self)
 
 
@@ -24,14 +24,16 @@ class BinOpKind(Enum):
 
 
 @dataclass
-class BinOp(Insn):
+class BinOp(Expr):
     kind: BinOpKind
+    lhs: Expr
+    rhs: Expr
 
-    def accept(self, visitor: "InsnVisitor") -> None:
+    def accept(self, visitor: "ExprVisitor") -> None:
         visitor.visit_bin_op(self)
 
 
-class InsnVisitor:
+class ExprVisitor:
     def visit_int(self, insn: Int) -> None:
         raise NotImplementedError()
 
@@ -39,10 +41,7 @@ class InsnVisitor:
         raise NotImplementedError()
 
 
-Program = list[Insn]
-
-
-class Translator(InsnVisitor):
+class Translator(ExprVisitor):
     def __init__(self, buffer: StringIO):
         self._buffer = buffer
 
@@ -50,6 +49,8 @@ class Translator(InsnVisitor):
         self._buffer.write(f"    pushq   ${insn.value}\n")
 
     def visit_bin_op(self, insn: BinOp) -> None:
+        insn.lhs.accept(self)
+        insn.rhs.accept(self)
         self._buffer.write(f"    popq    %rcx\n")
         self._buffer.write(f"    popq    %rax\n")
         if insn.kind == BinOpKind.add:
@@ -64,15 +65,14 @@ class Translator(InsnVisitor):
         self._buffer.write(f"    pushq   %rax\n")
 
 
-def translate(program: Program) -> str:
+def translate(program: Expr) -> str:
     buffer = StringIO()
     buffer.write(".global _fn\n\n")
     buffer.write(".section .text\n")
     buffer.write("_fn:\n")
 
     translator = Translator(buffer)
-    for insn in program:
-        insn.accept(translator)
+    program.accept(translator)
 
     buffer.write("    popq    %rax\n")
     buffer.write("    ret\n")
