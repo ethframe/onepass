@@ -41,6 +41,15 @@ class Var(Expr):
         visitor.visit_var(self)
 
 
+@dataclass
+class Call(Expr):
+    name: str
+    args: list[Expr]
+
+    def accept(self, visitor: "ExprVisitor") -> None:
+        visitor.visit_call(self)
+
+
 class ExprVisitor:
     def visit_int(self, expr: Int) -> None:
         raise NotImplementedError()
@@ -49,6 +58,9 @@ class ExprVisitor:
         raise NotImplementedError()
 
     def visit_var(self, expr: Var) -> None:
+        raise NotImplementedError()
+
+    def visit_call(self, expr: Call) -> None:
         raise NotImplementedError()
 
 
@@ -128,6 +140,14 @@ class ExprTranslator(ExprVisitor):
     def visit_var(self, expr: Var) -> None:
         offset = self._variables.get_offset(expr.name)
         self._writer.write(f"    pushq   {offset}(%rbp)\n")
+
+    def visit_call(self, expr: Call) -> None:
+        expr.args[0].accept(self)
+        self._writer.write("    popq    %rcx\n")
+        self._writer.write("    subq    $32, %rsp\n")
+        self._writer.write(f"    call    {expr.name}\n")
+        self._writer.write("    addq    $32, %rsp\n")
+        self._writer.write("    pushq   %rax\n")
 
 
 class Translator(StmtVisitor):
