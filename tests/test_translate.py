@@ -71,7 +71,6 @@ def test_translate(program, args, result, tmpdir):
     main = get_main(tmpdir, args)
     asm = tmpdir.join("fn.s")
     asm.write(translate(program))
-    print(translate(program))
     exe = tmpdir.join("a")
     assert subprocess.run(["gcc", "-o", exe, asm, main]).returncode == 0
     out = subprocess.run([exe], capture_output=True)
