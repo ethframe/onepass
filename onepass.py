@@ -74,11 +74,24 @@ class Return(Stmt):
         visitor.visit_return(self)
 
 
+@dataclass
+class If(Stmt):
+    test: Expr
+    pos: list[Stmt]
+    neg: list[Stmt]
+
+    def accept(self, visitor: "StmtVisitor") -> None:
+        visitor.visit_if(self)
+
+
 class StmtVisitor:
     def visit_assign(self, stmt: Assign) -> None:
         raise NotImplementedError()
 
     def visit_return(self, stmt: Return) -> None:
+        raise NotImplementedError()
+
+    def visit_if(self, stmt: If) -> None:
         raise NotImplementedError()
 
 
@@ -114,16 +127,21 @@ class ExprTranslator(ExprVisitor):
 
     def visit_var(self, expr: Var) -> None:
         offset = self._variables.get_offset(expr.name)
-        self._buffer.write(f"    movq    {offset}(%rbp), %rax\n")
-        self._buffer.write("    pushq   %rax\n")
+        self._buffer.write(f"    pushq   {offset}(%rbp)\n")
 
 
 class Translator(StmtVisitor):
     def __init__(self, spill: int, variables: "Variables", buffer: StringIO):
         self._offset = -spill
+        self._label = 0
         self._variables = variables
         self._buffer = buffer
         self._expr_translator = ExprTranslator(variables, buffer)
+
+    def _get_label(self) -> str:
+        label = f"l{self._label}"
+        self._label += 1
+        return label
 
     def visit_assign(self, stmt: Assign) -> None:
         if not self._variables.is_defined(stmt.name):
@@ -131,9 +149,8 @@ class Translator(StmtVisitor):
             self._offset -= 8
             self._variables.define_var(stmt.name, self._offset)
         stmt.expr.accept(self._expr_translator)
-        self._buffer.write("    popq    %rax\n")
         offset = self._variables.get_offset(stmt.name)
-        self._buffer.write(f"    movq    %rax, {offset}(%rbp)\n")
+        self._buffer.write(f"    popq    {offset}(%rbp)\n")
 
     def visit_return(self, stmt: Return) -> None:
         stmt.expr.accept(self._expr_translator)
@@ -141,6 +158,22 @@ class Translator(StmtVisitor):
         self._buffer.write("    movq    %rbp, %rsp\n")
         self._buffer.write("    popq    %rbp\n")
         self._buffer.write("    ret\n")
+
+    def visit_if(self, stmt: If) -> None:
+        # TODO: Handle differences in variables declarations in branches (scopes?)
+        neg = self._get_label()
+        end = self._get_label()
+        stmt.test.accept(self._expr_translator)
+        self._buffer.write("    popq    %rax\n")
+        self._buffer.write("    cmpq    $0, %rax\n")
+        self._buffer.write(f"    je      {neg}\n")
+        for s in stmt.pos:
+            s.accept(self)
+        self._buffer.write(f"    jmp     {end}\n")
+        self._buffer.write(f"{neg}:\n")
+        for s in stmt.neg:
+            s.accept(self)
+        self._buffer.write(f"{end}:\n")
 
 
 class Variables:

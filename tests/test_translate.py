@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from onepass import Assign, BinOp, BinOpKind, Int, Return, Var, translate, Program
+from onepass import Assign, BinOp, BinOpKind, Int, Return, Var, translate, Program, If
 
 TEST_CASES = [
     (Program([], [Return(Int(1))]), [], 1),
@@ -39,6 +39,12 @@ TEST_CASES = [
         Assign("x", BinOp(BinOpKind.add, Var("x"), Int(1))),
         Return(Var("x"))
     ]), [1], 2),
+    (Program(["x"], [
+        If(Var("x"), [Return(Int(0))], [Return(Int(1))])
+    ]), [1], 0),
+    (Program(["x"], [
+        If(Var("x"), [Return(Int(0))], [Return(Int(1))])
+    ]), [0], 1),
 ]
 
 
