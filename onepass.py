@@ -1,11 +1,11 @@
 from dataclasses import dataclass
 from enum import Enum
+from io import StringIO
 
 
 class Insn:
     def accept(self, visitor: "InsnVisitor") -> None:
         raise NotImplementedError()
-
 
 
 @dataclass
@@ -42,50 +42,39 @@ class InsnVisitor:
 Program = list[Insn]
 
 
-class Evaluator(InsnVisitor):
-    def __init__(self, stack: "Stack"):
-        self._stack = stack
+class Translator(InsnVisitor):
+    def __init__(self, buffer: StringIO):
+        self._buffer = buffer
 
     def visit_int(self, insn: Int) -> None:
-        self._stack.push(insn.value)
+        self._buffer.write(f"    pushq   ${insn.value}\n")
 
     def visit_bin_op(self, insn: BinOp) -> None:
-        b = self._stack.pop()
-        a = self._stack.pop()
+        self._buffer.write(f"    popq    %rcx\n")
+        self._buffer.write(f"    popq    %rax\n")
         if insn.kind == BinOpKind.add:
-            self._stack.push(a + b)
+            self._buffer.write(f"    addq    %rcx, %rax\n")
         elif insn.kind == BinOpKind.sub:
-            self._stack.push(a - b)
+            self._buffer.write(f"    subq    %rcx, %rax\n")
         elif insn.kind == BinOpKind.mul:
-            self._stack.push(a * b)
+            self._buffer.write(f"    imulq   %rcx\n")
         elif insn.kind == BinOpKind.div:
-            self._stack.push(a // b)
+            self._buffer.write(f"    movq    $0, %rdx\n")
+            self._buffer.write(f"    idivq   %rcx\n")
+        self._buffer.write(f"    pushq   %rax\n")
 
 
-def evaluate(program: Program) -> int:
-    stack = Stack()
-    evaluator = Evaluator(stack)
+def translate(program: Program) -> str:
+    buffer = StringIO()
+    buffer.write(".global _fn\n\n")
+    buffer.write(".section .text\n")
+    buffer.write("_fn:\n")
 
+    translator = Translator(buffer)
     for insn in program:
-        insn.accept(evaluator)
+        insn.accept(translator)
 
-    result = stack.pop()
-    if not stack.empty():
-        raise RuntimeError()
-    return result
+    buffer.write("    popq    %rax\n")
+    buffer.write("    ret\n")
 
-
-class Stack:
-    def __init__(self) -> None:
-        self._stack: list[int] = []
-
-    def push(self, value: int) -> None:
-        self._stack.append(value)
-
-    def pop(self) -> int:
-        if not self._stack:
-            raise RuntimeError("pop from empty stack")
-        return self._stack.pop()
-
-    def empty(self) -> bool:
-        return not self._stack
+    return buffer.getvalue()
