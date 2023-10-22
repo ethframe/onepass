@@ -1,16 +1,31 @@
-import pytest
 import subprocess
 
-from onepass import BinOp, BinOpKind, Int, translate
+import pytest
+
+from onepass import Assign, BinOp, BinOpKind, Int, Return, Var, translate
 
 TEST_CASES = [
-    (Int(1), 1),
-    (BinOp(BinOpKind.add, Int(5), Int(2)), 7),
-    (BinOp(BinOpKind.sub, Int(5), Int(2)), 3),
-    (BinOp(BinOpKind.mul, Int(5), Int(2)), 10),
-    (BinOp(BinOpKind.div, Int(5), Int(2)), 2),
-    (BinOp(BinOpKind.add, BinOp(BinOpKind.add, Int(1), Int(1)), Int(1)), 3),
-    (BinOp(BinOpKind.add, Int(1), BinOp(BinOpKind.add, Int(1), Int(1))), 3),
+    ([Return(Int(1))], 1),
+    ([Return(BinOp(BinOpKind.add, Int(5), Int(2)))], 7),
+    ([Return(BinOp(BinOpKind.sub, Int(5), Int(2)))], 3),
+    ([Return(BinOp(BinOpKind.mul, Int(5), Int(2)))], 10),
+    ([Return(BinOp(BinOpKind.div, Int(5), Int(2)))], 2),
+    ([Return(BinOp(BinOpKind.add, BinOp(BinOpKind.add, Int(1), Int(1)), Int(1)))], 3),
+    ([Return(BinOp(BinOpKind.add, Int(1), BinOp(BinOpKind.add, Int(1), Int(1))))], 3),
+    ([
+        Assign("x", Int(1)),
+        Return(Var("x"))
+    ], 1),
+    ([
+        Assign("x", Int(1)),
+        Assign("x", BinOp(BinOpKind.add, Var("x"), Int(1))),
+        Return(Var("x"))
+    ], 2),
+    ([
+        Assign("x", Int(1)),
+        Assign("y", BinOp(BinOpKind.add, Var("x"), Int(1))),
+        Return(Var("x"))
+    ], 1),
 ]
 
 

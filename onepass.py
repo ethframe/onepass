@@ -33,48 +33,139 @@ class BinOp(Expr):
         visitor.visit_bin_op(self)
 
 
+@dataclass
+class Var(Expr):
+    name: str
+
+    def accept(self, visitor: "ExprVisitor") -> None:
+        visitor.visit_var(self)
+
+
 class ExprVisitor:
-    def visit_int(self, insn: Int) -> None:
+    def visit_int(self, expr: Int) -> None:
         raise NotImplementedError()
 
-    def visit_bin_op(self, insn: BinOp) -> None:
+    def visit_bin_op(self, expr: BinOp) -> None:
+        raise NotImplementedError()
+
+    def visit_var(self, expr: Var) -> None:
         raise NotImplementedError()
 
 
-class Translator(ExprVisitor):
-    def __init__(self, buffer: StringIO):
+class Stmt:
+    def accept(self, visitor: "StmtVisitor") -> None:
+        raise NotImplementedError()
+
+
+@dataclass
+class Assign(Stmt):
+    name: str
+    expr: Expr
+
+    def accept(self, visitor: "StmtVisitor") -> None:
+        visitor.visit_assign(self)
+
+
+@dataclass
+class Return(Stmt):
+    expr: Expr
+
+    def accept(self, visitor: "StmtVisitor") -> None:
+        visitor.visit_return(self)
+
+
+class StmtVisitor:
+    def visit_assign(self, stmt: Assign) -> None:
+        raise NotImplementedError()
+
+    def visit_return(self, stmt: Return) -> None:
+        raise NotImplementedError()
+
+
+class ExprTranslator(ExprVisitor):
+    def __init__(self, variables: "Variables", buffer: StringIO):
+        self._variables = variables
         self._buffer = buffer
 
-    def visit_int(self, insn: Int) -> None:
-        self._buffer.write(f"    pushq   ${insn.value}\n")
+    def visit_int(self, expr: Int) -> None:
+        self._buffer.write(f"    pushq   ${expr.value}\n")
 
-    def visit_bin_op(self, insn: BinOp) -> None:
-        insn.lhs.accept(self)
-        insn.rhs.accept(self)
-        self._buffer.write(f"    popq    %rcx\n")
-        self._buffer.write(f"    popq    %rax\n")
-        if insn.kind == BinOpKind.add:
-            self._buffer.write(f"    addq    %rcx, %rax\n")
-        elif insn.kind == BinOpKind.sub:
-            self._buffer.write(f"    subq    %rcx, %rax\n")
-        elif insn.kind == BinOpKind.mul:
-            self._buffer.write(f"    imulq   %rcx\n")
-        elif insn.kind == BinOpKind.div:
-            self._buffer.write(f"    movq    $0, %rdx\n")
-            self._buffer.write(f"    idivq   %rcx\n")
-        self._buffer.write(f"    pushq   %rax\n")
+    def visit_bin_op(self, expr: BinOp) -> None:
+        expr.lhs.accept(self)
+        expr.rhs.accept(self)
+        self._buffer.write("    popq    %rcx\n")
+        self._buffer.write("    popq    %rax\n")
+        if expr.kind == BinOpKind.add:
+            self._buffer.write("    addq    %rcx, %rax\n")
+        elif expr.kind == BinOpKind.sub:
+            self._buffer.write("    subq    %rcx, %rax\n")
+        elif expr.kind == BinOpKind.mul:
+            self._buffer.write("    imulq   %rcx\n")
+        elif expr.kind == BinOpKind.div:
+            self._buffer.write("    movq    $0, %rdx\n")
+            self._buffer.write("    idivq   %rcx\n")
+        self._buffer.write("    pushq   %rax\n")
+
+    def visit_var(self, expr: Var) -> None:
+        offset = self._variables.get_offset(expr.name)
+        self._buffer.write(f"    movq    {offset}(%rbp), %rax\n")
+        self._buffer.write("    pushq   %rax\n")
 
 
-def translate(program: Expr) -> str:
+class Translator(StmtVisitor):
+    def __init__(self, variables: "Variables", buffer: StringIO):
+        self._offset = 0
+        self._variables = variables
+        self._buffer = buffer
+        self._expr_translator = ExprTranslator(variables, buffer)
+
+    def visit_assign(self, stmt: Assign) -> None:
+        if not self._variables.is_defined(stmt.name):
+            self._buffer.write("    subq    $8, %rsp\n")
+            self._offset -= 8
+            self._variables.define_var(stmt.name, self._offset)
+        stmt.expr.accept(self._expr_translator)
+        self._buffer.write("    popq    %rax\n")
+        offset = self._variables.get_offset(stmt.name)
+        self._buffer.write(f"    movq    %rax, {offset}(%rbp)\n")
+
+    def visit_return(self, stmt: Return) -> None:
+        stmt.expr.accept(self._expr_translator)
+        self._buffer.write("    popq    %rax\n")
+        self._buffer.write("    movq    %rbp, %rsp\n")
+        self._buffer.write("    popq    %rbp\n")
+        self._buffer.write("    ret\n")
+
+
+class Variables:
+    def __init__(self) -> None:
+        self._offsets: dict[str, int] = {}
+
+    def is_defined(self, name: str) -> bool:
+        return name in self._offsets
+
+    def define_var(self, name: str, offset: int) -> None:
+        self._offsets[name] = offset
+
+    def get_offset(self, name: str) -> int:
+        return self._offsets[name]
+
+
+Program = list[Stmt]
+
+
+def translate(program: Program) -> str:
     buffer = StringIO()
     buffer.write(".global _fn\n\n")
     buffer.write(".section .text\n")
     buffer.write("_fn:\n")
 
-    translator = Translator(buffer)
-    program.accept(translator)
+    buffer.write("    pushq   %rbp\n")
+    buffer.write("    movq    %rsp, %rbp\n")
 
-    buffer.write("    popq    %rax\n")
-    buffer.write("    ret\n")
+    variables = Variables()
+    translator = Translator(variables, buffer)
+    for stmt in program:
+        stmt.accept(translator)
 
     return buffer.getvalue()
