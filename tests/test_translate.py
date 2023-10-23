@@ -2,56 +2,58 @@ import subprocess
 
 import pytest
 
-from onepass import Assign, BinOp, BinOpKind, Int, Return, Var, translate, Program, If, Call
+from onepass import (Assign, BinOp, BinOpKind, Call, Func, If, Int, Program,
+                     Return, Var, translate)
 
 TEST_CASES = [
-    (Program([], [Return(Int(1))]), [], 1),
-    (Program([], [Return(BinOp(BinOpKind.add, Int(5), Int(2)))]), [], 7),
-    (Program([], [Return(BinOp(BinOpKind.sub, Int(5), Int(2)))]), [], 3),
-    (Program([], [Return(BinOp(BinOpKind.mul, Int(5), Int(2)))]), [], 10),
-    (Program([], [Return(BinOp(BinOpKind.div, Int(5), Int(2)))]), [], 2),
-    (Program([], [Return(BinOp(BinOpKind.add, BinOp(BinOpKind.add, Int(1), Int(1)), Int(1)))]), [], 3),
-    (Program([], [Return(BinOp(BinOpKind.add, Int(1), BinOp(BinOpKind.add, Int(1), Int(1))))]), [], 3),
-    (Program([], [
+    (Program([Func("_fn", [], [Return(Int(1))])]), [], 1),
+    (Program([Func("_fn", [], [Return(BinOp(BinOpKind.add, Int(5), Int(2)))])]), [], 7),
+    (Program([Func("_fn", [], [Return(BinOp(BinOpKind.sub, Int(5), Int(2)))])]), [], 3),
+    (Program([Func("_fn", [], [Return(BinOp(BinOpKind.mul, Int(5), Int(2)))])]), [], 10),
+    (Program([Func("_fn", [], [Return(BinOp(BinOpKind.div, Int(5), Int(2)))])]), [], 2),
+    (Program([Func("_fn", [], [Return(BinOp(BinOpKind.add, BinOp(BinOpKind.add, Int(1), Int(1)), Int(1)))])]), [], 3),
+    (Program([Func("_fn", [], [Return(BinOp(BinOpKind.add, Int(1), BinOp(BinOpKind.add, Int(1), Int(1))))])]), [], 3),
+    (Program([Func("_fn", [], [
         Assign("x", Int(1)),
         Return(Var("x"))
-    ]), [], 1),
-    (Program([], [
+    ])]), [], 1),
+    (Program([Func("_fn", [], [
         Assign("x", Int(1)),
         Assign("x", BinOp(BinOpKind.add, Var("x"), Int(1))),
         Return(Var("x"))
-    ]), [], 2),
-    (Program([], [
+    ])]), [], 2),
+    (Program([Func("_fn", [], [
         Assign("x", Int(1)),
         Assign("y", BinOp(BinOpKind.add, Var("x"), Int(1))),
         Return(Var("x"))
-    ]), [], 1),
-    (Program(["x"], [
+    ])]), [], 1),
+    (Program([Func("_fn", ["x"], [
         Return(Var("x"))
-    ]), [1], 1),
-    (Program(["x", "y"], [
+    ])]), [1], 1),
+    (Program([Func("_fn", ["x", "y"], [
         Return(Var("y"))
-    ]), [1, 2], 2),
-    (Program(["a", "b", "c", "d", "e", "f", "g"], [
+    ])]), [1, 2], 2),
+    (Program([Func("_fn", ["a", "b", "c", "d", "e", "f", "g"], [
         Return(Var("g"))
-    ]), [1, 2, 3, 4, 5, 6, 7], 7),
-    (Program(["x"], [
+    ])]), [1, 2, 3, 4, 5, 6, 7], 7),
+    (Program([Func("_fn", ["x"], [
         Assign("x", BinOp(BinOpKind.add, Var("x"), Int(1))),
         Return(Var("x"))
-    ]), [1], 2),
-    (Program(["x"], [
+    ])]), [1], 2),
+    (Program([Func("_fn", ["x"], [
         If(Var("x"), [Return(Int(0))], [Return(Int(1))])
-    ]), [1], 0),
-    (Program(["x"], [
+    ])]), [1], 0),
+    (Program([Func("_fn", ["x"], [
         If(Var("x"), [Return(Int(0))], [Return(Int(1))])
-    ]), [0], 1),
-    (Program(["x"], [
+    ])]), [0], 1),
+    (Program([Func("_fn", ["x"], [
         If(Var("x"), [
-            Return(BinOp(BinOpKind.mul, Var("x"), Call("_fn", [BinOp(BinOpKind.sub, Var("x"), Int(1))])))
+            Return(BinOp(BinOpKind.mul, Var("x"), Call(
+                "_fn", [BinOp(BinOpKind.sub, Var("x"), Int(1))])))
         ], [
             Return(Int(1))
         ])
-    ]), [6], 720),
+    ])]), [6], 720),
 ]
 
 

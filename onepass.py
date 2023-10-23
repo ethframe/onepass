@@ -108,9 +108,15 @@ class StmtVisitor:
 
 
 @dataclass
-class Program:
+class Func:
+    name: str
     args: list[str]
     body: list[Stmt]
+
+
+@dataclass
+class Program:
+    funcs: list[Func]
 
 
 class ExprTranslator(ExprVisitor):
@@ -325,28 +331,29 @@ def translate(
         program: Program,
         convention: CallingConvention = MicrosoftX64()) -> str:
     writer = AsmWriter()
-    writer.write(".global _fn\n\n")
     writer.write(".section .text\n")
-    writer.write("_fn:\n")
+    for func in program.funcs:
+        writer.write(f"\n.global {func.name}\n")
+        writer.write(f"{func.name}:\n")
 
-    writer.write("    pushq   %rbp\n")
-    writer.write("    movq    %rsp, %rbp\n")
+        writer.write("    pushq   %rbp\n")
+        writer.write("    movq    %rsp, %rbp\n")
 
-    spill = convention.alloc_spill(len(program.args))
-    if spill != 0:
-        writer.write("    subq    ${spill}, %rsp\n")
+        spill = convention.alloc_spill(len(func.args))
+        if spill != 0:
+            writer.write("    subq    ${spill}, %rsp\n")
 
-    stack = Stack(-spill)
+        stack = Stack(-spill)
 
-    for i, name in enumerate(program.args):
-        offset = convention.get_offset(i)
-        stack.define_var(name, offset)
-        reg = convention.get_register(i)
-        if reg is not None:
-            writer.write(f"    movq    {reg}, {offset}(%rbp)\n")
+        for i, name in enumerate(func.args):
+            offset = convention.get_offset(i)
+            stack.define_var(name, offset)
+            reg = convention.get_register(i)
+            if reg is not None:
+                writer.write(f"    movq    {reg}, {offset}(%rbp)\n")
 
-    translator = Translator(convention, stack, writer)
-    for stmt in program.body:
-        stmt.accept(translator)
+        translator = Translator(convention, stack, writer)
+        for stmt in func.body:
+            stmt.accept(translator)
 
     return writer.getvalue()
