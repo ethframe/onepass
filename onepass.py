@@ -114,8 +114,11 @@ class Program:
 
 
 class ExprTranslator(ExprVisitor):
-    def __init__(self, variables: "Variables", writer: "AsmWriter"):
-        self._variables = variables
+    def __init__(
+            self, convention: "CallingConvention", stack: "Stack",
+            writer: "AsmWriter"):
+        self._convention = convention
+        self._stack = stack
         self._writer = writer
 
     def visit_int(self, expr: Int) -> None:
@@ -138,30 +141,52 @@ class ExprTranslator(ExprVisitor):
         self._writer.write("    pushq   %rax\n")
 
     def visit_var(self, expr: Var) -> None:
-        offset = self._variables.get_offset(expr.name)
+        offset = self._stack.get_offset(expr.name)
         self._writer.write(f"    pushq   {offset}(%rbp)\n")
 
     def visit_call(self, expr: Call) -> None:
-        expr.args[0].accept(self)
-        self._writer.write("    popq    %rcx\n")
-        self._writer.write("    subq    $32, %rsp\n")
+        stack = self._stack.scope()
+        slots: list[int] = []
+        for _ in range(self._convention.alloc_spill(len(expr.args)) // 8):
+            slots.append(stack.allocate())
+        regs: list[str] = []
+        for i, arg in enumerate(expr.args):
+            arg.accept(self)
+            reg = self._convention.get_register(i)
+            if reg is None:
+                self._writer.write(f"    popq    {slots.pop()}(%rbp)\n")
+            else:
+                regs.append(reg)
+        while regs:
+            self._writer.write(f"    popq    {regs.pop()}\n")
+        adjust = self._convention.shadow_space() + \
+            self._stack.align(self._convention.alignment())
+        if adjust > 0:
+            self._writer.write(f"    subq    ${adjust}, %rsp\n")
         self._writer.write(f"    call    {expr.name}\n")
-        self._writer.write("    addq    $32, %rsp\n")
+        if adjust > 0:
+            self._writer.write(f"    addq    ${adjust}, %rsp\n")
         self._writer.write("    pushq   %rax\n")
+        allocated = stack.allocated()
+        if allocated > 0:
+            self._writer.write(f"    addq    ${allocated}, %rsp\n")
 
 
 class Translator(StmtVisitor):
-    def __init__(self, variables: "Variables", writer: "AsmWriter"):
-        self._variables = variables
+    def __init__(
+            self, convention: "CallingConvention", stack: "Stack",
+            writer: "AsmWriter"):
+        self._convention = convention
+        self._stack = stack
         self._writer = writer
-        self._expr_translator = ExprTranslator(variables, writer)
+        self._expr_translator = ExprTranslator(convention, stack, writer)
 
     def visit_assign(self, stmt: Assign) -> None:
-        if not self._variables.is_defined(stmt.name):
+        if not self._stack.is_defined(stmt.name):
             self._writer.write("    subq    $8, %rsp\n")
-            self._variables.define_var(stmt.name, self._variables.allocate())
+            self._stack.define_var(stmt.name, self._stack.allocate())
         stmt.expr.accept(self._expr_translator)
-        offset = self._variables.get_offset(stmt.name)
+        offset = self._stack.get_offset(stmt.name)
         self._writer.write(f"    popq    {offset}(%rbp)\n")
 
     def visit_return(self, stmt: Return) -> None:
@@ -185,8 +210,8 @@ class Translator(StmtVisitor):
         self._writer.write(f"{end}:\n")
 
     def _handle_if_branch(self, stmts: list[Stmt]) -> None:
-        variables = self._variables.scope()
-        translator = Translator(variables, self._writer)
+        variables = self._stack.scope()
+        translator = Translator(self._convention, variables, self._writer)
         for stmt in stmts:
             stmt.accept(translator)
         allocated = variables.allocated()
@@ -194,10 +219,10 @@ class Translator(StmtVisitor):
             self._writer.write(f"    addq    ${allocated}, %rsp\n")
 
 
-class Variables:
-    def __init__(self, offset: int, next: "Variables | None" = None) -> None:
+class Stack:
+    def __init__(self, base: int, next: "Stack | None" = None) -> None:
         self._offsets: dict[str, int] = {}
-        self._offset = offset
+        self._offset = base
         self._next = next
 
     def is_defined(self, name: str) -> bool:
@@ -221,8 +246,13 @@ class Variables:
             return self._next._offset - self._offset
         return -self._offset
 
-    def scope(self) -> "Variables":
-        return Variables(self._offset, self)
+    def align(self, alignment: int) -> int:
+        if alignment > 0:
+            return alignment + self._offset % alignment
+        return 0
+
+    def scope(self) -> "Stack":
+        return Stack(self._offset, self)
 
 
 class CallingConvention:
@@ -233,8 +263,13 @@ class CallingConvention:
         raise NotImplementedError()
 
     def alloc_spill(self, count: int) -> int:
-        raise NotImplementedError()
+        return 0
 
+    def shadow_space(self) -> int:
+        return 0
+
+    def alignment(self) -> int:
+        return 0
 
 class MicrosoftX64(CallingConvention):
     def get_register(self, index: int) -> str | None:
@@ -245,8 +280,8 @@ class MicrosoftX64(CallingConvention):
     def get_offset(self, index: int) -> int:
         return 8 * index + 16
 
-    def alloc_spill(self, count: int) -> int:
-        return 0
+    def shadow_space(self) -> int:
+        return 32
 
 
 class SysVAMD64(CallingConvention):
@@ -264,6 +299,9 @@ class SysVAMD64(CallingConvention):
         if count > 6:
             return 8 * (count - 6)
         return 0
+
+    def alignment(self) -> int:
+        return 16
 
 
 class AsmWriter:
@@ -298,16 +336,16 @@ def translate(
     if spill != 0:
         writer.write("    subq    ${spill}, %rsp\n")
 
-    variables = Variables(-spill)
+    stack = Stack(-spill)
 
     for i, name in enumerate(program.args):
         offset = convention.get_offset(i)
-        variables.define_var(name, offset)
+        stack.define_var(name, offset)
         reg = convention.get_register(i)
         if reg is not None:
             writer.write(f"    movq    {reg}, {offset}(%rbp)\n")
 
-    translator = Translator(variables, writer)
+    translator = Translator(convention, stack, writer)
     for stmt in program.body:
         stmt.accept(translator)
 
