@@ -165,8 +165,10 @@ class Value:
         elif self.kind == ValueKind.tos:
             emitter.emit(f"popq    {offset}(%rbp)")
 
-    def to_arg(self, reg: str, emitter: "AsmEmitter") -> str:
-        if self.kind == ValueKind.mem:
+    def to_arg(self, reg: str, allow_imm: bool, emitter: "AsmEmitter") -> str:
+        if allow_imm and self.kind == ValueKind.imm:
+            return f"${self.value}"
+        elif self.kind == ValueKind.mem:
             return f"{self.offset}(%rbp)"
         else:
             self.to_reg(reg, emitter)
@@ -186,7 +188,8 @@ class ExprTranslator(ExprVisitor[Value]):
 
     def visit_bin_op(self, expr: BinOp) -> Value:
         lhs = expr.lhs.accept(self).to_tos(self._emitter)
-        rhs = expr.rhs.accept(self).to_arg("%rcx", self._emitter)
+        imm = expr.kind == BinOpKind.add or expr.kind == BinOpKind.sub
+        rhs = expr.rhs.accept(self).to_arg("%rcx", imm, self._emitter)
         lhs.to_reg("%rax", self._emitter)
         if expr.kind == BinOpKind.add:
             self._emitter.emit(f"addq    {rhs}, %rax")
