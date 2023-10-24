@@ -138,13 +138,11 @@ class Value:
     value: int = 0
     offset: int = 0
 
-    def to_tos(self, emitter: "AsmEmitter") -> None:
-        if self.kind == ValueKind.imm:
-            emitter.emit(f"pushq   ${self.value}")
-        elif self.kind == ValueKind.reg:
+    def to_tos(self, emitter: "AsmEmitter") -> "Value":
+        if self.kind == ValueKind.reg:
             emitter.emit("pushq   %rax")
-        elif self.kind == ValueKind.mem:
-            emitter.emit(f"pushq   {self.offset}(%rbp)")
+            return Value(ValueKind.tos)
+        return self
 
     def to_reg(self, reg: str, emitter: "AsmEmitter") -> None:
         if self.kind == ValueKind.imm:
@@ -187,9 +185,9 @@ class ExprTranslator(ExprVisitor[Value]):
         return Value(ValueKind.imm, value=expr.value)
 
     def visit_bin_op(self, expr: BinOp) -> Value:
-        expr.lhs.accept(self).to_tos(self._emitter)
+        lhs = expr.lhs.accept(self).to_tos(self._emitter)
         rhs = expr.rhs.accept(self).to_arg("%rcx", self._emitter)
-        self._emitter.emit("popq    %rax")
+        lhs.to_reg("%rax", self._emitter)
         if expr.kind == BinOpKind.add:
             self._emitter.emit(f"addq    {rhs}, %rax")
         elif expr.kind == BinOpKind.sub:
@@ -211,6 +209,7 @@ class ExprTranslator(ExprVisitor[Value]):
         if len(expr.args) > regs:
             for _ in range(len(expr.args) - regs):
                 slots.append(stack.allocate(self._emitter))
+        tos: list[tuple[str, Value]] = []
         for i, arg in enumerate(expr.args):
             val = arg.accept(self)
             if i >= regs:
@@ -218,9 +217,9 @@ class ExprTranslator(ExprVisitor[Value]):
             elif i == len(expr.args)-1:
                 val.to_reg(self._cc.registers[i], self._emitter)
             else:
-                val.to_tos(self._emitter)
-        for i in reversed(list(range(min(len(expr.args)-1, regs)))):
-            self._emitter.emit(f"popq    {self._cc.registers[i]}")
+                tos.append((self._cc.registers[i], val.to_tos(self._emitter)))
+        for reg, val in reversed(tos):
+            val.to_reg(reg, self._emitter)
         stack.adjust(self._cc, self._emitter)
         self._emitter.emit(f"call    {expr.name}")
         stack.free(self._emitter)
