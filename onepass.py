@@ -127,25 +127,34 @@ class Program:
 
 class ValueKind(Enum):
     reg = auto()
+    mem = auto()
     tos = auto()
 
 
 @dataclass
 class Value:
     kind: ValueKind
+    offset: int = 0
 
     def to_tos(self, emitter: "AsmEmitter") -> None:
         if self.kind == ValueKind.reg:
             emitter.emit("pushq   %rax")
+        elif self.kind == ValueKind.mem:
+            emitter.emit(f"pushq   {self.offset}(%rbp)")
 
     def to_reg(self, reg: str, emitter: "AsmEmitter") -> None:
         if self.kind == ValueKind.reg and reg != "%rax":
             emitter.emit(f"movq    %rax, {reg}")
+        elif self.kind == ValueKind.mem:
+            emitter.emit(f"movq    {self.offset}(%rbp), {reg}")
         elif self.kind == ValueKind.tos:
             emitter.emit(f"popq    {reg}")
 
     def to_mem(self, offset: int, emitter: "AsmEmitter") -> None:
         if self.kind == ValueKind.reg:
+            emitter.emit(f"movq    %rax, {offset}(%rbp)")
+        elif self.kind == ValueKind.mem and self.offset != offset:
+            emitter.emit(f"movq    {self.offset}(%rbp), %rax")
             emitter.emit(f"movq    %rax, {offset}(%rbp)")
         elif self.kind == ValueKind.tos:
             emitter.emit(f"popq    {offset}(%rbp)")
@@ -179,9 +188,7 @@ class ExprTranslator(ExprVisitor[Value]):
         return Value(ValueKind.reg)
 
     def visit_var(self, expr: Var) -> Value:
-        offset = self._stack.get_offset(expr.name)
-        self._emitter.emit(f"movq    {offset}(%rbp), %rax")
-        return Value(ValueKind.reg)
+        return Value(ValueKind.mem, offset=self._stack.get_offset(expr.name))
 
     def visit_call(self, expr: Call) -> Value:
         stack = self._stack.scope()
