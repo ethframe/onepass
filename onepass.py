@@ -167,6 +167,13 @@ class Value:
         elif self.kind == ValueKind.tos:
             emitter.emit(f"popq    {offset}(%rbp)")
 
+    def to_arg(self, reg: str, emitter: "AsmEmitter") -> str:
+        if self.kind == ValueKind.mem:
+            return f"{self.offset}(%rbp)"
+        else:
+            self.to_reg(reg, emitter)
+            return reg
+
 
 class ExprTranslator(ExprVisitor[Value]):
     def __init__(
@@ -181,17 +188,17 @@ class ExprTranslator(ExprVisitor[Value]):
 
     def visit_bin_op(self, expr: BinOp) -> Value:
         expr.lhs.accept(self).to_tos(self._emitter)
-        expr.rhs.accept(self).to_reg("%rcx", self._emitter)
+        rhs = expr.rhs.accept(self).to_arg("%rcx", self._emitter)
         self._emitter.emit("popq    %rax")
         if expr.kind == BinOpKind.add:
-            self._emitter.emit(f"addq    %rcx, %rax")
+            self._emitter.emit(f"addq    {rhs}, %rax")
         elif expr.kind == BinOpKind.sub:
-            self._emitter.emit(f"subq    %rcx, %rax")
+            self._emitter.emit(f"subq    {rhs}, %rax")
         elif expr.kind == BinOpKind.mul:
-            self._emitter.emit(f"imulq   %rcx")
+            self._emitter.emit(f"imulq   {rhs}")
         elif expr.kind == BinOpKind.div:
             self._emitter.emit("movq    $0, %rdx")
-            self._emitter.emit(f"idivq   %rcx")
+            self._emitter.emit(f"idivq   {rhs}")
         return Value(ValueKind.reg)
 
     def visit_var(self, expr: Var) -> Value:
