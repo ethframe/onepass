@@ -126,6 +126,7 @@ class Program:
 
 
 class ValueKind(Enum):
+    imm = auto()
     reg = auto()
     mem = auto()
     tos = auto()
@@ -134,16 +135,21 @@ class ValueKind(Enum):
 @dataclass
 class Value:
     kind: ValueKind
+    value: int = 0
     offset: int = 0
 
     def to_tos(self, emitter: "AsmEmitter") -> None:
-        if self.kind == ValueKind.reg:
+        if self.kind == ValueKind.imm:
+            emitter.emit(f"pushq   ${self.value}")
+        elif self.kind == ValueKind.reg:
             emitter.emit("pushq   %rax")
         elif self.kind == ValueKind.mem:
             emitter.emit(f"pushq   {self.offset}(%rbp)")
 
     def to_reg(self, reg: str, emitter: "AsmEmitter") -> None:
-        if self.kind == ValueKind.reg and reg != "%rax":
+        if self.kind == ValueKind.imm:
+            emitter.emit(f"movq    ${self.value}, {reg}")
+        elif self.kind == ValueKind.reg and reg != "%rax":
             emitter.emit(f"movq    %rax, {reg}")
         elif self.kind == ValueKind.mem:
             emitter.emit(f"movq    {self.offset}(%rbp), {reg}")
@@ -151,6 +157,8 @@ class Value:
             emitter.emit(f"popq    {reg}")
 
     def to_mem(self, offset: int, emitter: "AsmEmitter") -> None:
+        if self.kind == ValueKind.imm:
+            emitter.emit(f"movq    ${self.value}, {offset}(%rbp)")
         if self.kind == ValueKind.reg:
             emitter.emit(f"movq    %rax, {offset}(%rbp)")
         elif self.kind == ValueKind.mem and self.offset != offset:
@@ -169,8 +177,7 @@ class ExprTranslator(ExprVisitor[Value]):
         self._emitter = emitter
 
     def visit_int(self, expr: Int) -> Value:
-        self._emitter.emit(f"movq    ${expr.value}, %rax")
-        return Value(ValueKind.reg)
+        return Value(ValueKind.imm, value=expr.value)
 
     def visit_bin_op(self, expr: BinOp) -> Value:
         expr.lhs.accept(self).to_tos(self._emitter)
