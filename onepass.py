@@ -121,9 +121,9 @@ class Program:
 
 class ExprTranslator(ExprVisitor):
     def __init__(
-            self, convention: "CallingConvention", stack: "Stack",
+            self, cc: "CallingConvention", stack: "Stack",
             emitter: "AsmEmitter"):
-        self._convention = convention
+        self._cc = cc
         self._stack = stack
         self._emitter = emitter
 
@@ -153,20 +153,20 @@ class ExprTranslator(ExprVisitor):
     def visit_call(self, expr: Call) -> None:
         stack = self._stack.scope()
         slots: list[int] = []
-        for _ in range(self._convention.alloc_spill(len(expr.args)) // 8):
+        for _ in range(max(0, len(expr.args) - len(self._cc.registers))):
             slots.append(stack.allocate())
         regs: list[str] = []
         for i, arg in enumerate(expr.args):
             arg.accept(self)
-            reg = self._convention.get_register(i)
+            reg = self._cc.get_register(i)
             if reg is None:
                 self._emitter.emit(f"popq    {slots.pop()}(%rbp)")
             else:
                 regs.append(reg)
         while regs:
             self._emitter.emit(f"popq    {regs.pop()}")
-        adjust = self._convention.shadow_space() + \
-            self._stack.align(self._convention.alignment())
+        adjust = (8 * len(self._cc.registers) if self._cc.shadow else 0) + \
+            self._stack.align(self._cc.alignment)
         if adjust > 0:
             self._emitter.emit(f"subq    ${adjust}, %rsp")
         self._emitter.emit(f"call    {expr.name}")
@@ -261,54 +261,29 @@ class Stack:
         return Stack(self._offset, self)
 
 
+@dataclass
 class CallingConvention:
+    registers: list[str]
+    alignment: int = 0
+    shadow: bool = False
+
     def get_register(self, index: int) -> str | None:
-        raise NotImplementedError()
-
-    def get_offset(self, index: int) -> int:
-        raise NotImplementedError()
-
-    def alloc_spill(self, count: int) -> int:
-        return 0
-
-    def shadow_space(self) -> int:
-        return 0
-
-    def alignment(self) -> int:
-        return 0
-
-
-class MicrosoftX64(CallingConvention):
-    def get_register(self, index: int) -> str | None:
-        if index >= 4:
+        if index >= len(self.registers):
             return None
-        return ["%rcx", "%rdx", "%r8", "%r9"][index]
+        return self.registers[index]
 
     def get_offset(self, index: int) -> int:
-        return 8 * index + 16
+        if self.shadow:
+            return 8 * index + 16
+        if index >= len(self.registers):
+            return 8 * (index - len(self.registers)) + 16
+        return -8 * (index + 1)
 
-    def shadow_space(self) -> int:
-        return 32
 
-
-class SysVAMD64(CallingConvention):
-    def get_register(self, index: int) -> str | None:
-        if index >= 6:
-            return None
-        return ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"][index]
-
-    def get_offset(self, index: int) -> int:
-        if index >= 6:
-            return 8 * (index - 6) + 16
-        return -8 * index - 8
-
-    def alloc_spill(self, count: int) -> int:
-        if count > 6:
-            return 8 * (count - 6)
-        return 0
-
-    def alignment(self) -> int:
-        return 16
+MS_X64 = CallingConvention(["%rcx", "%rdx", "%r8", "%r9"], shadow=True)
+SYSV_AMD64 = CallingConvention(
+    ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"], alignment=16
+)
 
 
 class AsmEmitter:
@@ -331,34 +306,40 @@ class AsmEmitter:
         return self._buffer.getvalue()
 
 
-def translate(
-        program: Program,
-        convention: CallingConvention = MicrosoftX64()) -> str:
+def translate(program: Program, cc: CallingConvention = MS_X64) -> str:
     emitter = AsmEmitter()
     emitter.emit(".section .text", indent=False)
+
     for func in program.funcs:
         emitter.emit("", indent=False)
-        emitter.emit(f".global {func.name}", indent=False)
-        emitter.emit(f"{func.name}:", indent=False)
-
-        emitter.emit("pushq   %rbp")
-        emitter.emit("movq    %rsp, %rbp")
-
-        spill = convention.alloc_spill(len(func.args))
-        if spill != 0:
-            emitter.emit(f"subq    ${spill}, %rsp")
-
-        stack = Stack(-spill)
-
-        for i, name in enumerate(func.args):
-            offset = convention.get_offset(i)
-            stack.define_var(name, offset)
-            reg = convention.get_register(i)
-            if reg is not None:
-                emitter.emit(f"movq    {reg}, {offset}(%rbp)")
-
-        translator = Translator(convention, stack, emitter)
-        for stmt in func.body:
-            stmt.accept(translator)
+        translate_func(func, emitter, cc)
 
     return emitter.getvalue()
+
+
+def translate_func(
+        func: Func, emitter: AsmEmitter, cc: CallingConvention) -> None:
+    emitter.emit(f".global {func.name}", indent=False)
+    emitter.emit(f"{func.name}:", indent=False)
+
+    emitter.emit("pushq   %rbp")
+    emitter.emit("movq    %rsp, %rbp")
+
+    offset = 0
+    if not cc.shadow:
+        spill = 8 * len(cc.registers)
+        emitter.emit(f"subq    ${spill}, %rsp")
+        offset -= spill
+
+    stack = Stack(offset)
+
+    for i, name in enumerate(func.args):
+        offset = cc.get_offset(i)
+        stack.define_var(name, offset)
+        reg = cc.get_register(i)
+        if reg is not None:
+            emitter.emit(f"movq    {reg}, {offset}(%rbp)")
+
+    translator = Translator(cc, stack, emitter)
+    for stmt in func.body:
+        stmt.accept(translator)
