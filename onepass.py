@@ -1,10 +1,16 @@
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, auto
 from io import StringIO
 
 
+from typing import Generic, TypeVar
+
+
+T = TypeVar("T")
+
+
 class Expr:
-    def accept(self, visitor: "ExprVisitor") -> None:
+    def accept(self, visitor: "ExprVisitor[T]") -> T:
         raise NotImplementedError()
 
 
@@ -12,8 +18,8 @@ class Expr:
 class Int(Expr):
     value: int
 
-    def accept(self, visitor: "ExprVisitor") -> None:
-        visitor.visit_int(self)
+    def accept(self, visitor: "ExprVisitor[T]") -> T:
+        return visitor.visit_int(self)
 
 
 class BinOpKind(Enum):
@@ -29,16 +35,16 @@ class BinOp(Expr):
     lhs: Expr
     rhs: Expr
 
-    def accept(self, visitor: "ExprVisitor") -> None:
-        visitor.visit_bin_op(self)
+    def accept(self, visitor: "ExprVisitor[T]") -> T:
+        return visitor.visit_bin_op(self)
 
 
 @dataclass
 class Var(Expr):
     name: str
 
-    def accept(self, visitor: "ExprVisitor") -> None:
-        visitor.visit_var(self)
+    def accept(self, visitor: "ExprVisitor[T]") -> T:
+        return visitor.visit_var(self)
 
 
 @dataclass
@@ -46,21 +52,21 @@ class Call(Expr):
     name: str
     args: list[Expr]
 
-    def accept(self, visitor: "ExprVisitor") -> None:
-        visitor.visit_call(self)
+    def accept(self, visitor: "ExprVisitor[T]") -> T:
+        return visitor.visit_call(self)
 
 
-class ExprVisitor:
-    def visit_int(self, expr: Int) -> None:
+class ExprVisitor(Generic[T]):
+    def visit_int(self, expr: Int) -> T:
         raise NotImplementedError()
 
-    def visit_bin_op(self, expr: BinOp) -> None:
+    def visit_bin_op(self, expr: BinOp) -> T:
         raise NotImplementedError()
 
-    def visit_var(self, expr: Var) -> None:
+    def visit_var(self, expr: Var) -> T:
         raise NotImplementedError()
 
-    def visit_call(self, expr: Call) -> None:
+    def visit_call(self, expr: Call) -> T:
         raise NotImplementedError()
 
 
@@ -119,7 +125,33 @@ class Program:
     funcs: list[Func]
 
 
-class ExprTranslator(ExprVisitor):
+class ValueKind(Enum):
+    reg = auto()
+    tos = auto()
+
+
+@dataclass
+class Value:
+    kind: ValueKind
+
+    def to_tos(self, emitter: "AsmEmitter") -> None:
+        if self.kind == ValueKind.reg:
+            emitter.emit("pushq   %rax")
+
+    def to_reg(self, reg: str, emitter: "AsmEmitter") -> None:
+        if self.kind == ValueKind.reg and reg != "%rax":
+            emitter.emit(f"movq    %rax, {reg}")
+        elif self.kind == ValueKind.tos:
+            emitter.emit(f"popq    {reg}")
+
+    def to_mem(self, offset: int, emitter: "AsmEmitter") -> None:
+        if self.kind == ValueKind.reg:
+            emitter.emit(f"movq    %rax, {offset}(%rbp)")
+        elif self.kind == ValueKind.tos:
+            emitter.emit(f"popq    {offset}(%rbp)")
+
+
+class ExprTranslator(ExprVisitor[Value]):
     def __init__(
             self, cc: "CallingConvention", stack: "Stack",
             emitter: "AsmEmitter"):
@@ -127,48 +159,51 @@ class ExprTranslator(ExprVisitor):
         self._stack = stack
         self._emitter = emitter
 
-    def visit_int(self, expr: Int) -> None:
-        self._emitter.emit(f"pushq   ${expr.value}")
+    def visit_int(self, expr: Int) -> Value:
+        self._emitter.emit(f"movq    ${expr.value}, %rax")
+        return Value(ValueKind.reg)
 
-    def visit_bin_op(self, expr: BinOp) -> None:
-        expr.lhs.accept(self)
-        expr.rhs.accept(self)
-        self._emitter.emit("popq    %rcx")
+    def visit_bin_op(self, expr: BinOp) -> Value:
+        expr.lhs.accept(self).to_tos(self._emitter)
+        expr.rhs.accept(self).to_reg("%rcx", self._emitter)
         self._emitter.emit("popq    %rax")
         if expr.kind == BinOpKind.add:
-            self._emitter.emit("addq    %rcx, %rax")
+            self._emitter.emit(f"addq    %rcx, %rax")
         elif expr.kind == BinOpKind.sub:
-            self._emitter.emit("subq    %rcx, %rax")
+            self._emitter.emit(f"subq    %rcx, %rax")
         elif expr.kind == BinOpKind.mul:
-            self._emitter.emit("imulq   %rcx")
+            self._emitter.emit(f"imulq   %rcx")
         elif expr.kind == BinOpKind.div:
             self._emitter.emit("movq    $0, %rdx")
-            self._emitter.emit("idivq   %rcx")
-        self._emitter.emit("pushq   %rax")
+            self._emitter.emit(f"idivq   %rcx")
+        return Value(ValueKind.reg)
 
-    def visit_var(self, expr: Var) -> None:
+    def visit_var(self, expr: Var) -> Value:
         offset = self._stack.get_offset(expr.name)
-        self._emitter.emit(f"pushq   {offset}(%rbp)")
+        self._emitter.emit(f"movq    {offset}(%rbp), %rax")
+        return Value(ValueKind.reg)
 
-    def visit_call(self, expr: Call) -> None:
+    def visit_call(self, expr: Call) -> Value:
         stack = self._stack.scope()
+        regs = len(self._cc.registers)
         slots: list[int] = []
-        for _ in range(max(0, len(expr.args) - len(self._cc.registers))):
-            slots.append(stack.allocate(self._emitter))
-        regs: list[str] = []
+        if len(expr.args) > regs:
+            for _ in range(len(expr.args) - regs):
+                slots.append(stack.allocate(self._emitter))
         for i, arg in enumerate(expr.args):
-            arg.accept(self)
-            reg = self._cc.get_register(i)
-            if reg is None:
-                self._emitter.emit(f"popq    {slots.pop()}(%rbp)")
+            val = arg.accept(self)
+            if i >= regs:
+                val.to_mem(slots[i - regs], self._emitter)
+            elif i == len(expr.args)-1:
+                val.to_reg(self._cc.registers[i], self._emitter)
             else:
-                regs.append(reg)
-        while regs:
-            self._emitter.emit(f"popq    {regs.pop()}")
+                val.to_tos(self._emitter)
+        for i in reversed(list(range(min(len(expr.args)-1, regs)))):
+            self._emitter.emit(f"popq    {self._cc.registers[i]}")
         stack.adjust(self._cc, self._emitter)
         self._emitter.emit(f"call    {expr.name}")
         stack.free(self._emitter)
-        self._emitter.emit("pushq   %rax")
+        return Value(ValueKind.reg)
 
 
 class Translator(StmtVisitor):
@@ -186,25 +221,21 @@ class Translator(StmtVisitor):
 
     def visit_assign(self, stmt: Assign) -> None:
         if not self._stack.is_defined(stmt.name):
-            self._emitter.emit("subq    $8, %rsp")
             self._stack.define_var(
                 stmt.name, self._stack.allocate(self._emitter))
-        stmt.expr.accept(self._expr_translator)
         offset = self._stack.get_offset(stmt.name)
-        self._emitter.emit(f"popq    {offset}(%rbp)")
+        stmt.expr.accept(self._expr_translator).to_mem(offset, self._emitter)
 
     def visit_return(self, stmt: Return) -> None:
-        stmt.expr.accept(self._expr_translator)
-        self._emitter.emit("popq    %rax")
-        self._emitter.emit("movq    %rbp, %rsp")
+        stmt.expr.accept(self._expr_translator).to_reg("%rax", self._emitter)
+        self._stack.free(self._emitter)
         self._emitter.emit("popq    %rbp")
         self._emitter.emit("ret")
 
     def visit_if(self, stmt: If) -> None:
         neg = self._emitter.get_label()
         end = self._emitter.get_label()
-        stmt.test.accept(self._expr_translator)
-        self._emitter.emit("popq    %rax")
+        stmt.test.accept(self._expr_translator).to_reg("%rax", self._emitter)
         self._emitter.emit("cmpq    $0, %rax")
         self._emitter.emit(f"je      {neg}")
         stack = self._stack.scope()
