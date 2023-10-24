@@ -210,6 +210,8 @@ class ExprTranslator(ExprVisitor[Value]):
         regs = len(self._cc.registers)
         slots: list[int] = []
         if len(expr.args) > regs:
+            stack.adjust(
+                self._cc.alignment, len(expr.args) - regs, self._emitter)
             for _ in range(len(expr.args) - regs):
                 slots.append(stack.allocate(self._emitter))
         tos: list[tuple[str, Value]] = []
@@ -223,7 +225,6 @@ class ExprTranslator(ExprVisitor[Value]):
                 tos.append((self._cc.registers[i], val.to_tos(self._emitter)))
         for reg, val in reversed(tos):
             val.to_reg(reg, self._emitter)
-        stack.adjust(self._cc, self._emitter)
         self._emitter.emit(f"call    {expr.name}")
         stack.free(self._emitter)
         return Value(ValueKind.reg)
@@ -251,7 +252,7 @@ class Translator(StmtVisitor):
 
     def visit_return(self, stmt: Return) -> None:
         stmt.expr.accept(self._expr_translator).to_reg("%rax", self._emitter)
-        self._stack.free(self._emitter)
+        self._stack.leave(self._emitter)
         self._emitter.emit("popq    %rbp")
         self._emitter.emit("ret")
 
@@ -273,9 +274,11 @@ class Translator(StmtVisitor):
 
 
 class Stack:
-    def __init__(self, base: int, next: "Stack | None" = None) -> None:
+    def __init__(
+            self, base: int, shadow: int, next: "Stack | None" = None) -> None:
         self._offsets: dict[str, int] = {}
         self._offset = base
+        self._shadow = shadow
         self._next = next
 
     def is_defined(self, name: str) -> bool:
@@ -290,12 +293,11 @@ class Stack:
             if name in self._offsets or self._next is None \
             else self._next.get_offset(name)
 
-    def adjust(self, cc: "CallingConvention", emitter: "AsmEmitter") -> None:
-        offset = 8 * len(cc.registers) if cc.shadow else 0
-        if cc.alignment > 0:
-            offset += cc.alignment + (self._offset - offset) % cc.alignment
-        self._offset -= offset
-        emitter.emit(f"subq    ${offset}, %rsp")
+    def adjust(self, args: int, alignment: int, emitter: "AsmEmitter") -> None:
+        if alignment > 0:
+            offset = alignment + (self._offset - args) % alignment
+            emitter.emit(f"subq    ${offset}, %rsp")
+            self._offset -= offset
 
     def allocate(self, emitter: "AsmEmitter") -> int:
         self._offset -= 8
@@ -303,11 +305,16 @@ class Stack:
         return self._offset
 
     def scope(self) -> "Stack":
-        return Stack(self._offset, self)
+        return Stack(self._offset, self._shadow, self)
 
     def free(self, emitter: "AsmEmitter") -> None:
-        allocated = -self._offset if self._next is None \
-            else self._next._offset - self._offset
+        allocated = (0 if self._next is None else self._next._offset) \
+            - self._offset
+        if allocated > 0:
+            emitter.emit(f"addq    ${allocated}, %rsp")
+
+    def leave(self, emitter: "AsmEmitter") -> None:
+        allocated = -self._offset + self._shadow
         if allocated > 0:
             emitter.emit(f"addq    ${allocated}, %rsp")
 
@@ -320,7 +327,7 @@ class Stack:
 @dataclass
 class CallingConvention:
     registers: list[str]
-    alignment: int = 0
+    alignment: int = 16
     shadow: bool = False
 
     def get_register(self, index: int) -> str | None:
@@ -337,9 +344,7 @@ class CallingConvention:
 
 
 MS_X64 = CallingConvention(["%rcx", "%rdx", "%r8", "%r9"], shadow=True)
-SYSV_AMD64 = CallingConvention(
-    ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"], alignment=16
-)
+SYSV_AMD64 = CallingConvention(["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"])
 
 
 class AsmEmitter:
@@ -381,13 +386,17 @@ def translate_func(
     emitter.emit("pushq   %rbp")
     emitter.emit("movq    %rsp, %rbp")
 
-    offset = 0
-    if not cc.shadow:
-        spill = 8 * len(cc.registers)
-        emitter.emit(f"subq    ${spill}, %rsp")
-        offset -= spill
+    base = 0
+    shadow = 0
 
-    stack = Stack(offset)
+    if cc.shadow:
+        shadow = 8 * len(cc.registers)
+        emitter.emit(f"subq    ${shadow}, %rsp")
+    else:
+        base = -8 * min(len(cc.registers), len(func.args))
+        emitter.emit(f"subq    ${-base}, %rsp")
+
+    stack = Stack(base, shadow=shadow)
 
     for i, name in enumerate(func.args):
         offset = cc.get_offset(i)
