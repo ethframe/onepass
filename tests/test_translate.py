@@ -2,8 +2,10 @@ import subprocess
 
 import pytest
 
-from onepass import (Assign, BinOp, BinOpKind, Call, Func, If, Int, Program,
-                     Return, Var, translate)
+from onepass import (
+    Assign, BinOp, BinOpKind, Call, Func, If, Int, Program, Return, Var,
+    translate
+)
 
 TEST_CASES = [
     (Program([Func("_fn", [], [Return(Int(1))])]), [], 1),
@@ -11,8 +13,10 @@ TEST_CASES = [
     (Program([Func("_fn", [], [Return(BinOp(BinOpKind.sub, Int(5), Int(2)))])]), [], 3),
     (Program([Func("_fn", [], [Return(BinOp(BinOpKind.mul, Int(5), Int(2)))])]), [], 10),
     (Program([Func("_fn", [], [Return(BinOp(BinOpKind.div, Int(5), Int(2)))])]), [], 2),
-    (Program([Func("_fn", [], [Return(BinOp(BinOpKind.add, BinOp(BinOpKind.add, Int(1), Int(1)), Int(1)))])]), [], 3),
-    (Program([Func("_fn", [], [Return(BinOp(BinOpKind.add, Int(1), BinOp(BinOpKind.add, Int(1), Int(1))))])]), [], 3),
+    (Program([Func("_fn", [], [Return(BinOp(BinOpKind.add, BinOp(
+        BinOpKind.add, Int(1), Int(1)), Int(1)))])]), [], 3),
+    (Program([Func("_fn", [], [Return(BinOp(BinOpKind.add, Int(
+        1), BinOp(BinOpKind.add, Int(1), Int(1))))])]), [], 3),
     (Program([Func("_fn", [], [
         Assign("x", Int(1)),
         Return(Var("x"))
