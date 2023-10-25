@@ -206,14 +206,14 @@ class ExprTranslator(ExprVisitor[Value]):
         return Value(ValueKind.mem, offset=self._stack.get_offset(expr.name))
 
     def visit_call(self, expr: Call) -> Value:
-        stack = self._stack.scope()
+        self._stack.new_region()
         regs = len(self._cc.registers)
         slots: list[int] = []
         if len(expr.args) > regs:
-            stack.adjust(
+            self._stack.adjust(
                 self._cc.alignment, len(expr.args) - regs, self._emitter)
             for _ in range(len(expr.args) - regs):
-                slots.append(stack.allocate(self._emitter))
+                slots.append(self._stack.allocate(self._emitter))
         tos: list[tuple[str, Value]] = []
         for i, arg in enumerate(expr.args):
             val = arg.accept(self)
@@ -226,7 +226,7 @@ class ExprTranslator(ExprVisitor[Value]):
         for reg, val in reversed(tos):
             val.to_reg(reg, self._emitter)
         self._emitter.emit(f"call    {expr.name}")
-        stack.free(self._emitter)
+        self._stack.free_region(self._emitter)
         return Value(ValueKind.reg)
 
 
@@ -262,36 +262,38 @@ class Translator(StmtVisitor):
         stmt.test.accept(self._expr_translator).to_reg("%rax", self._emitter)
         self._emitter.emit("cmpq    $0, %rax")
         self._emitter.emit(f"je      {neg}")
-        stack = self._stack.scope()
-        Translator(self._convention, stack, self._emitter).translate(stmt.pos)
-        stack.free(self._emitter)
+        self._stack.new_region()
+        self.translate(stmt.pos)
+        self._stack.free_region(self._emitter)
         self._emitter.emit(f"jmp     {end}")
         self._emitter.emit(f"{neg}:", indent=False)
-        stack = self._stack.scope()
-        Translator(self._convention, stack, self._emitter).translate(stmt.neg)
-        stack.free(self._emitter)
+        self._stack.new_region()
+        self.translate(stmt.neg)
+        self._stack.free_region(self._emitter)
         self._emitter.emit(f"{end}:", indent=False)
 
 
 class Stack:
-    def __init__(
-            self, base: int, shadow: int, next: "Stack | None" = None) -> None:
+    def __init__(self, base: int, shadow: int) -> None:
         self._offsets: dict[str, int] = {}
         self._offset = base
         self._shadow = shadow
-        self._next = next
+        self._next: list[tuple[dict[str, int], int]] = []
 
     def is_defined(self, name: str) -> bool:
         return name in self._offsets or \
-            self._next is not None and self._next.is_defined(name)
+            any(name in offsets for offsets, _ in reversed(self._next))
 
     def define_var(self, name: str, offset: int) -> None:
         self._offsets[name] = offset
 
     def get_offset(self, name: str) -> int:
-        return self._offsets[name] \
-            if name in self._offsets or self._next is None \
-            else self._next.get_offset(name)
+        if name in self._offsets:
+            return self._offsets[name]
+        for offsets, _ in reversed(self._next):
+            if name in offsets:
+                return offsets[name]
+        raise RuntimeError(f"undefined variable {name}")
 
     def adjust(self, args: int, alignment: int, emitter: "AsmEmitter") -> None:
         if alignment > 0:
@@ -304,14 +306,15 @@ class Stack:
         emitter.emit("subq    $8, %rsp")
         return self._offset
 
-    def scope(self) -> "Stack":
-        return Stack(self._offset, self._shadow, self)
+    def new_region(self) -> None:
+        self._next.append((self._offsets, self._offset))
 
-    def free(self, emitter: "AsmEmitter") -> None:
-        allocated = (0 if self._next is None else self._next._offset) \
-            - self._offset
+    def free_region(self, emitter: "AsmEmitter") -> None:
+        self._offsets, offset = self._next.pop()
+        allocated = offset - self._offset
         if allocated > 0:
             emitter.emit(f"addq    ${allocated}, %rsp")
+        self._offset = offset
 
     def leave(self, emitter: "AsmEmitter") -> None:
         allocated = -self._offset + self._shadow
