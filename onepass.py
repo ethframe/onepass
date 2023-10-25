@@ -138,38 +138,40 @@ class Value:
     value: int = 0
     offset: int = 0
 
+    def asm(self) -> str:
+        if self.kind == ValueKind.imm:
+            return f"${self.value}"
+        elif self.kind == ValueKind.reg:
+            return "%rax"
+        elif self.kind == ValueKind.mem:
+            return f"{self.offset}(%rbp)"
+        raise RuntimeError()
+
     def to_tos(self, emitter: "AsmEmitter") -> "Value":
         if self.kind == ValueKind.reg:
-            emitter.emit("pushq   %rax")
+            emitter.emit(f"pushq   {self.asm()}")
             return Value(ValueKind.tos)
         return self
 
     def to_reg(self, reg: str, emitter: "AsmEmitter") -> None:
-        if self.kind == ValueKind.imm:
-            emitter.emit(f"movq    ${self.value}, {reg}")
-        elif self.kind == ValueKind.reg and reg != "%rax":
-            emitter.emit(f"movq    %rax, {reg}")
-        elif self.kind == ValueKind.mem:
-            emitter.emit(f"movq    {self.offset}(%rbp), {reg}")
-        elif self.kind == ValueKind.tos:
+        if self.kind == ValueKind.tos:
             emitter.emit(f"popq    {reg}")
+        elif self.kind != ValueKind.reg or reg != "%rax":
+            emitter.emit(f"movq    {self.asm()}, {reg}")
 
     def to_mem(self, offset: int, emitter: "AsmEmitter") -> None:
-        if self.kind == ValueKind.imm:
-            emitter.emit(f"movq    ${self.value}, {offset}(%rbp)")
-        if self.kind == ValueKind.reg:
-            emitter.emit(f"movq    %rax, {offset}(%rbp)")
+        if self.kind == ValueKind.imm or self.kind == ValueKind.reg:
+            emitter.emit(f"movq    {self.asm()}, {offset}(%rbp)")
         elif self.kind == ValueKind.mem and self.offset != offset:
-            emitter.emit(f"movq    {self.offset}(%rbp), %rax")
+            emitter.emit(f"movq    {self.asm()}, %rax")
             emitter.emit(f"movq    %rax, {offset}(%rbp)")
         elif self.kind == ValueKind.tos:
             emitter.emit(f"popq    {offset}(%rbp)")
 
     def to_arg(self, reg: str, allow_imm: bool, emitter: "AsmEmitter") -> str:
-        if allow_imm and self.kind == ValueKind.imm:
-            return f"${self.value}"
-        elif self.kind == ValueKind.mem:
-            return f"{self.offset}(%rbp)"
+        if self.kind == ValueKind.mem or \
+                allow_imm and self.kind == ValueKind.imm:
+            return self.asm()
         else:
             self.to_reg(reg, emitter)
             return reg
@@ -306,20 +308,20 @@ class Stack:
         emitter.emit("subq    $8, %rsp")
         return self._offset
 
+    def free(self, size: int, emitter: "AsmEmitter") -> None:
+        if size > 0:
+            emitter.emit(f"addq    ${size}, %rsp")
+
     def new_region(self) -> None:
         self._next.append((self._offsets, self._offset))
 
     def free_region(self, emitter: "AsmEmitter") -> None:
         self._offsets, offset = self._next.pop()
-        allocated = offset - self._offset
-        if allocated > 0:
-            emitter.emit(f"addq    ${allocated}, %rsp")
+        self.free(offset - self._offset, emitter)
         self._offset = offset
 
     def leave(self, emitter: "AsmEmitter") -> None:
-        allocated = -self._offset + self._shadow
-        if allocated > 0:
-            emitter.emit(f"addq    ${allocated}, %rsp")
+        self.free(-self._offset + self._shadow, emitter)
 
     def align(self, alignment: int) -> int:
         if alignment > 0:
