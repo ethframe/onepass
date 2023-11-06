@@ -213,14 +213,14 @@ class ExprTranslator(ExprVisitor[Value]):
         slots: list[int] = []
         if len(expr.args) > regs:
             self._stack.adjust(
-                self._cc.alignment, len(expr.args) - regs, self._emitter)
+                self._cc.alignment, 8 * (len(expr.args) - regs), self._emitter)
             for _ in range(len(expr.args) - regs):
-                slots.append(self._stack.allocate(self._emitter))
+                slots.append(self._stack.allocate(8, self._emitter))
         tos: list[tuple[str, Value]] = []
         for i, arg in enumerate(expr.args):
             val = arg.accept(self)
             if i >= regs:
-                val.to_mem(slots[i - regs], self._emitter)
+                val.to_mem(slots[len(expr.args) - i - 1], self._emitter)
             elif i == len(expr.args)-1:
                 val.to_reg(self._cc.registers[i], self._emitter)
             else:
@@ -248,7 +248,7 @@ class Translator(StmtVisitor):
     def visit_assign(self, stmt: Assign) -> None:
         if not self._stack.is_defined(stmt.name):
             self._stack.define_var(
-                stmt.name, self._stack.allocate(self._emitter))
+                stmt.name, self._stack.allocate(8, self._emitter))
         offset = self._stack.get_offset(stmt.name)
         stmt.expr.accept(self._expr_translator).to_mem(offset, self._emitter)
 
@@ -276,15 +276,15 @@ class Translator(StmtVisitor):
 
 
 class Stack:
-    def __init__(self, base: int, shadow: int) -> None:
+    def __init__(self, shadow: int = 0) -> None:
+        self._offset = 0
         self._offsets: dict[str, int] = {}
-        self._offset = base
+        self._next: list[tuple[int, dict[str, int]]] = []
         self._shadow = shadow
-        self._next: list[tuple[dict[str, int], int]] = []
 
     def is_defined(self, name: str) -> bool:
         return name in self._offsets or \
-            any(name in offsets for offsets, _ in reversed(self._next))
+            any(name in offsets for _, offsets in reversed(self._next))
 
     def define_var(self, name: str, offset: int) -> None:
         self._offsets[name] = offset
@@ -292,20 +292,21 @@ class Stack:
     def get_offset(self, name: str) -> int:
         if name in self._offsets:
             return self._offsets[name]
-        for offsets, _ in reversed(self._next):
+        for _, offsets in reversed(self._next):
             if name in offsets:
                 return offsets[name]
         raise RuntimeError(f"undefined variable {name}")
 
-    def adjust(self, args: int, alignment: int, emitter: "AsmEmitter") -> None:
+    def adjust(self, size: int, alignment: int, emitter: "AsmEmitter") -> None:
         if alignment > 0:
-            offset = alignment + (self._offset - args) % alignment
+            offset = alignment + (self._offset - size) % alignment
             emitter.emit(f"subq    ${offset}, %rsp")
             self._offset -= offset
 
-    def allocate(self, emitter: "AsmEmitter") -> int:
-        self._offset -= 8
-        emitter.emit("subq    $8, %rsp")
+    def allocate(self, size: int, emitter: "AsmEmitter") -> int:
+        if size > 0:
+            self._offset -= size
+            emitter.emit(f"subq    ${size}, %rsp")
         return self._offset
 
     def free(self, size: int, emitter: "AsmEmitter") -> None:
@@ -313,20 +314,19 @@ class Stack:
             emitter.emit(f"addq    ${size}, %rsp")
 
     def new_region(self) -> None:
-        self._next.append((self._offsets, self._offset))
+        self._next.append((self._offset, self._offsets))
 
     def free_region(self, emitter: "AsmEmitter") -> None:
-        self._offsets, offset = self._next.pop()
+        offset, self._offsets = self._next.pop()
         self.free(offset - self._offset, emitter)
         self._offset = offset
 
+    def shadow(self, shadow: int, emitter: "AsmEmitter") -> None:
+        self._shadow += shadow
+        emitter.emit(f"subq    ${shadow}, %rsp")
+
     def leave(self, emitter: "AsmEmitter") -> None:
         self.free(-self._offset + self._shadow, emitter)
-
-    def align(self, alignment: int) -> int:
-        if alignment > 0:
-            return alignment + self._offset % alignment
-        return 0
 
 
 @dataclass
@@ -391,17 +391,12 @@ def translate_func(
     emitter.emit("pushq   %rbp")
     emitter.emit("movq    %rsp, %rbp")
 
-    base = 0
-    shadow = 0
+    stack = Stack()
 
     if cc.shadow:
-        shadow = 8 * len(cc.registers)
-        emitter.emit(f"subq    ${shadow}, %rsp")
+        stack.shadow(8 * len(cc.registers), emitter)
     else:
-        base = -8 * min(len(cc.registers), len(func.args))
-        emitter.emit(f"subq    ${-base}, %rsp")
-
-    stack = Stack(base, shadow=shadow)
+        stack.allocate(8 * min(len(cc.registers), len(func.args)), emitter)
 
     for i, name in enumerate(func.args):
         offset = cc.get_offset(i)

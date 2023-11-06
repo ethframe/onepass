@@ -40,6 +40,17 @@ TEST_CASES = [
     (Program([Func("_fn", ["a", "b", "c", "d", "e", "f", "g"], [
         Return(Var("g"))
     ])]), [1, 2, 3, 4, 5, 6, 7], 7),
+    (Program([
+        Func("_g", ["a", "b", "c", "d", "e", "f", "g"], [
+            Return(Var("g"))
+        ]),
+        Func("_fn", ["a", "b", "c", "d", "e", "f", "g"], [
+            Return(Call("_g", [
+                Var("a"), Var("b"), Var("c"), Var("d"),
+                Var("e"), Var("f"), Var("g")
+            ]))
+        ]),
+    ]), [1, 2, 3, 4, 5, 6, 7], 7),
     (Program([Func("_fn", ["x"], [
         Assign("x", BinOp(BinOpKind.add, Var("x"), Int(1))),
         Return(Var("x"))
@@ -84,6 +95,7 @@ def test_translate(program, args, result, tmpdir):
     main = get_main(tmpdir, args)
     asm = tmpdir.join("fn.s")
     asm.write(translate(program))
+    print(asm.read())
     exe = tmpdir.join("a")
     assert subprocess.run(["gcc", "-o", exe, asm, main]).returncode == 0
     out = subprocess.run([exe], capture_output=True)
