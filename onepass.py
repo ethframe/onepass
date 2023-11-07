@@ -138,7 +138,7 @@ class Value:
     value: int = 0
     offset: int = 0
 
-    def asm(self) -> str:
+    def _asm(self) -> str:
         if self.kind == ValueKind.imm:
             return f"${self.value}"
         elif self.kind == ValueKind.reg:
@@ -149,7 +149,7 @@ class Value:
 
     def to_tos(self, emitter: "AsmEmitter") -> "Value":
         if self.kind == ValueKind.reg:
-            emitter.emit(f"pushq   {self.asm()}")
+            emitter.emit(f"pushq   {self._asm()}")
             return Value(ValueKind.tos)
         return self
 
@@ -157,13 +157,13 @@ class Value:
         if self.kind == ValueKind.tos:
             emitter.emit(f"popq    {reg}")
         elif self.kind != ValueKind.reg or reg != "%rax":
-            emitter.emit(f"movq    {self.asm()}, {reg}")
+            emitter.emit(f"movq    {self._asm()}, {reg}")
 
     def to_mem(self, offset: int, emitter: "AsmEmitter") -> None:
         if self.kind == ValueKind.imm or self.kind == ValueKind.reg:
-            emitter.emit(f"movq    {self.asm()}, {offset}(%rbp)")
+            emitter.emit(f"movq    {self._asm()}, {offset}(%rbp)")
         elif self.kind == ValueKind.mem and self.offset != offset:
-            emitter.emit(f"movq    {self.asm()}, %rax")
+            emitter.emit(f"movq    {self._asm()}, %rax")
             emitter.emit(f"movq    %rax, {offset}(%rbp)")
         elif self.kind == ValueKind.tos:
             emitter.emit(f"popq    {offset}(%rbp)")
@@ -171,7 +171,7 @@ class Value:
     def to_arg(self, reg: str, allow_imm: bool, emitter: "AsmEmitter") -> str:
         if self.kind == ValueKind.mem or \
                 allow_imm and self.kind == ValueKind.imm:
-            return self.asm()
+            return self._asm()
         else:
             self.to_reg(reg, emitter)
             return reg
@@ -179,10 +179,10 @@ class Value:
 
 class ExprTranslator(ExprVisitor[Value]):
     def __init__(
-            self, cc: "CallingConvention", stack: "Stack",
+            self, cc: "CallingConvention", frame: "Frame",
             emitter: "AsmEmitter"):
         self._cc = cc
-        self._stack = stack
+        self._frame = frame
         self._emitter = emitter
 
     def visit_int(self, expr: Int) -> Value:
@@ -205,17 +205,17 @@ class ExprTranslator(ExprVisitor[Value]):
         return Value(ValueKind.reg)
 
     def visit_var(self, expr: Var) -> Value:
-        return Value(ValueKind.mem, offset=self._stack.get_offset(expr.name))
+        return Value(ValueKind.mem, offset=self._frame.get_offset(expr.name))
 
     def visit_call(self, expr: Call) -> Value:
-        self._stack.new_region()
+        self._frame.new_region()
         regs = len(self._cc.registers)
         slots: list[int] = []
         if len(expr.args) > regs:
-            self._stack.adjust(
+            self._frame.adjust(
                 self._cc.alignment, 8 * (len(expr.args) - regs), self._emitter)
             for _ in range(len(expr.args) - regs):
-                slots.append(self._stack.allocate(8, self._emitter))
+                slots.append(self._frame.allocate(8, self._emitter))
         tos: list[tuple[str, Value]] = []
         for i, arg in enumerate(expr.args):
             val = arg.accept(self)
@@ -228,33 +228,33 @@ class ExprTranslator(ExprVisitor[Value]):
         for reg, val in reversed(tos):
             val.to_reg(reg, self._emitter)
         self._emitter.emit(f"call    {expr.name}")
-        self._stack.free_region(self._emitter)
+        self._frame.free_region(self._emitter)
         return Value(ValueKind.reg)
 
 
 class Translator(StmtVisitor):
     def __init__(
-            self, convention: "CallingConvention", stack: "Stack",
+            self, convention: "CallingConvention", frame: "Frame",
             emitter: "AsmEmitter"):
         self._convention = convention
-        self._stack = stack
+        self._frame = frame
         self._emitter = emitter
-        self._expr_translator = ExprTranslator(convention, stack, emitter)
+        self._expr_translator = ExprTranslator(convention, frame, emitter)
 
     def translate(self, stmts: list[Stmt]) -> None:
         for stmt in stmts:
             stmt.accept(self)
 
     def visit_assign(self, stmt: Assign) -> None:
-        if not self._stack.is_defined(stmt.name):
-            self._stack.define_var(
-                stmt.name, self._stack.allocate(8, self._emitter))
-        offset = self._stack.get_offset(stmt.name)
+        if not self._frame.is_defined(stmt.name):
+            self._frame.define_var(
+                stmt.name, self._frame.allocate(8, self._emitter))
+        offset = self._frame.get_offset(stmt.name)
         stmt.expr.accept(self._expr_translator).to_mem(offset, self._emitter)
 
     def visit_return(self, stmt: Return) -> None:
         stmt.expr.accept(self._expr_translator).to_reg("%rax", self._emitter)
-        self._stack.leave(self._emitter)
+        self._frame.leave(self._emitter)
         self._emitter.emit("popq    %rbp")
         self._emitter.emit("ret")
 
@@ -264,23 +264,23 @@ class Translator(StmtVisitor):
         stmt.test.accept(self._expr_translator).to_reg("%rax", self._emitter)
         self._emitter.emit("cmpq    $0, %rax")
         self._emitter.emit(f"je      {neg}")
-        self._stack.new_region()
+        self._frame.new_region()
         self.translate(stmt.pos)
-        self._stack.free_region(self._emitter)
+        self._frame.free_region(self._emitter)
         self._emitter.emit(f"jmp     {end}")
         self._emitter.emit(f"{neg}:", indent=False)
-        self._stack.new_region()
+        self._frame.new_region()
         self.translate(stmt.neg)
-        self._stack.free_region(self._emitter)
+        self._frame.free_region(self._emitter)
         self._emitter.emit(f"{end}:", indent=False)
 
 
-class Stack:
-    def __init__(self, shadow: int = 0) -> None:
+class Frame:
+    def __init__(self) -> None:
         self._offset = 0
         self._offsets: dict[str, int] = {}
         self._next: list[tuple[int, dict[str, int]]] = []
-        self._shadow = shadow
+        self._shadow = 0
 
     def is_defined(self, name: str) -> bool:
         return name in self._offsets or \
@@ -391,20 +391,27 @@ def translate_func(
     emitter.emit("pushq   %rbp")
     emitter.emit("movq    %rsp, %rbp")
 
-    stack = Stack()
+    frame = create_frame(func.args, emitter, cc)
+
+    translator = Translator(cc, frame, emitter)
+    for stmt in func.body:
+        stmt.accept(translator)
+
+
+def create_frame(
+        args: list[str], emitter: AsmEmitter, cc: CallingConvention) -> Frame:
+    frame = Frame()
 
     if cc.shadow:
-        stack.shadow(8 * len(cc.registers), emitter)
+        frame.shadow(8 * len(cc.registers), emitter)
     else:
-        stack.allocate(8 * min(len(cc.registers), len(func.args)), emitter)
+        frame.allocate(8 * min(len(cc.registers), len(args)), emitter)
 
-    for i, name in enumerate(func.args):
+    for i, name in enumerate(args):
         offset = cc.get_offset(i)
-        stack.define_var(name, offset)
+        frame.define_var(name, offset)
         reg = cc.get_register(i)
         if reg is not None:
             emitter.emit(f"movq    {reg}, {offset}(%rbp)")
 
-    translator = Translator(cc, stack, emitter)
-    for stmt in func.body:
-        stmt.accept(translator)
+    return frame
