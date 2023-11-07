@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from enum import Enum, auto
+from enum import Enum
 from io import StringIO
 
 
@@ -125,56 +125,72 @@ class Program:
     funcs: list[Func]
 
 
-class ValueKind(Enum):
-    imm = auto()
-    reg = auto()
-    mem = auto()
-    tos = auto()
+class Value:
+    def to_reg(self, reg: str, emitter: "AsmEmitter") -> None:
+        raise NotImplementedError()
+
+    def to_mem(self, offset: int, emitter: "AsmEmitter") -> None:
+        raise NotImplementedError()
+
+    def store_tmp(self, emitter: "AsmEmitter") -> "Value":
+        return self
+
+    def load_arg(self, reg: str, allow_imm: bool, emitter: "AsmEmitter") -> str:
+        self.to_reg(reg, emitter)
+        return reg
 
 
 @dataclass
-class Value:
-    kind: ValueKind
-    value: int = 0
-    offset: int = 0
-
-    def _asm(self) -> str:
-        if self.kind == ValueKind.imm:
-            return f"${self.value}"
-        elif self.kind == ValueKind.reg:
-            return "%rax"
-        elif self.kind == ValueKind.mem:
-            return f"{self.offset}(%rbp)"
-        raise RuntimeError()
-
-    def to_tos(self, emitter: "AsmEmitter") -> "Value":
-        if self.kind == ValueKind.reg:
-            emitter.emit(f"pushq   {self._asm()}")
-            return Value(ValueKind.tos)
-        return self
+class Imm(Value):
+    value: int
 
     def to_reg(self, reg: str, emitter: "AsmEmitter") -> None:
-        if self.kind == ValueKind.tos:
-            emitter.emit(f"popq    {reg}")
-        elif self.kind != ValueKind.reg or reg != "%rax":
-            emitter.emit(f"movq    {self._asm()}, {reg}")
+        emitter.emit(f"movq    ${self.value}, {reg}")
 
     def to_mem(self, offset: int, emitter: "AsmEmitter") -> None:
-        if self.kind == ValueKind.imm or self.kind == ValueKind.reg:
-            emitter.emit(f"movq    {self._asm()}, {offset}(%rbp)")
-        elif self.kind == ValueKind.mem and self.offset != offset:
-            emitter.emit(f"movq    {self._asm()}, %rax")
-            emitter.emit(f"movq    %rax, {offset}(%rbp)")
-        elif self.kind == ValueKind.tos:
-            emitter.emit(f"popq    {offset}(%rbp)")
+        emitter.emit(f"movq    ${self.value}, {offset}(%rbp)")
 
-    def to_arg(self, reg: str, allow_imm: bool, emitter: "AsmEmitter") -> str:
-        if self.kind == ValueKind.mem or \
-                allow_imm and self.kind == ValueKind.imm:
-            return self._asm()
-        else:
-            self.to_reg(reg, emitter)
-            return reg
+    def load_arg(self, reg: str, allow_imm: bool, emitter: "AsmEmitter") -> str:
+        if allow_imm:
+            return f"${self.value}"
+        return super().load_arg(reg, allow_imm, emitter)
+
+
+class Reg(Value):
+    def to_reg(self, reg: str, emitter: "AsmEmitter") -> None:
+        if reg != "%rax":
+            emitter.emit(f"movq    %rax, {reg}")
+
+    def to_mem(self, offset: int, emitter: "AsmEmitter") -> None:
+        emitter.emit(f"movq    %rax, {offset}(%rbp)")
+
+    def store_tmp(self, emitter: "AsmEmitter") -> "Value":
+        emitter.emit("pushq   %rax")
+        return Tos()
+
+
+@dataclass
+class Mem(Value):
+    offset: int
+
+    def to_reg(self, reg: str, emitter: "AsmEmitter") -> None:
+        emitter.emit(f"movq    {self.offset}(%rbp), {reg}")
+
+    def to_mem(self, offset: int, emitter: "AsmEmitter") -> None:
+        if self.offset != offset:
+            emitter.emit(f"movq    {self.offset}(%rbp), %rax")
+            emitter.emit(f"movq    %rax, {offset}(%rbp)")
+
+    def load_arg(self, reg: str, allow_imm: bool, emitter: "AsmEmitter") -> str:
+        return f"{self.offset}(%rbp)"
+
+
+class Tos(Value):
+    def to_reg(self, reg: str, emitter: "AsmEmitter") -> None:
+        emitter.emit(f"popq    {reg}")
+
+    def to_mem(self, offset: int, emitter: "AsmEmitter") -> None:
+        emitter.emit(f"popq    {offset}(%rbp)")
 
 
 class ExprTranslator(ExprVisitor[Value]):
@@ -186,12 +202,12 @@ class ExprTranslator(ExprVisitor[Value]):
         self._emitter = emitter
 
     def visit_int(self, expr: Int) -> Value:
-        return Value(ValueKind.imm, value=expr.value)
+        return Imm(expr.value)
 
     def visit_bin_op(self, expr: BinOp) -> Value:
-        lhs = expr.lhs.accept(self).to_tos(self._emitter)
+        lhs = expr.lhs.accept(self).store_tmp(self._emitter)
         imm = expr.kind == BinOpKind.add or expr.kind == BinOpKind.sub
-        rhs = expr.rhs.accept(self).to_arg("%rcx", imm, self._emitter)
+        rhs = expr.rhs.accept(self).load_arg("%rcx", imm, self._emitter)
         lhs.to_reg("%rax", self._emitter)
         if expr.kind == BinOpKind.add:
             self._emitter.emit(f"addq    {rhs}, %rax")
@@ -202,10 +218,10 @@ class ExprTranslator(ExprVisitor[Value]):
         elif expr.kind == BinOpKind.div:
             self._emitter.emit("movq    $0, %rdx")
             self._emitter.emit(f"idivq   {rhs}")
-        return Value(ValueKind.reg)
+        return Reg()
 
     def visit_var(self, expr: Var) -> Value:
-        return Value(ValueKind.mem, offset=self._frame.get_offset(expr.name))
+        return Mem(self._frame.get_offset(expr.name))
 
     def visit_call(self, expr: Call) -> Value:
         self._frame.new_region()
@@ -224,12 +240,13 @@ class ExprTranslator(ExprVisitor[Value]):
             elif i == len(expr.args)-1:
                 val.to_reg(self._cc.registers[i], self._emitter)
             else:
-                tos.append((self._cc.registers[i], val.to_tos(self._emitter)))
+                tos.append(
+                    (self._cc.registers[i], val.store_tmp(self._emitter)))
         for reg, val in reversed(tos):
             val.to_reg(reg, self._emitter)
         self._emitter.emit(f"call    {expr.name}")
         self._frame.free_region(self._emitter)
-        return Value(ValueKind.reg)
+        return Reg()
 
 
 class Translator(StmtVisitor):
