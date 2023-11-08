@@ -31,8 +31,7 @@ fac:
     movq    %rsp, %rbp
     subq    $32, %rsp
     movq    %rcx, 16(%rbp)
-    movq    16(%rbp), %rax
-    cmpq    $0, %rax
+    cmpq    $0, 16(%rbp)
     je      l0
     movq    16(%rbp), %rax
     subq    $1, %rax
@@ -41,14 +40,12 @@ fac:
     movq    %rax, %rcx
     movq    16(%rbp), %rax
     imulq   %rcx
-    addq    $32, %rsp
-    popq    %rbp
+    leave
     ret
     jmp     l1
 l0:
     movq    $1, %rax
-    addq    $32, %rsp
-    popq    %rbp
+    leave
     ret
 l1:
 ```

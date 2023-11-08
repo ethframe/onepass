@@ -272,14 +272,14 @@ class Translator(StmtVisitor):
     def visit_return(self, stmt: Return) -> None:
         stmt.expr.accept(self._expr_translator).to_reg("%rax", self._emitter)
         self._frame.leave(self._emitter)
-        self._emitter.emit("popq    %rbp")
         self._emitter.emit("ret")
 
     def visit_if(self, stmt: If) -> None:
         neg = self._emitter.get_label()
         end = self._emitter.get_label()
-        stmt.test.accept(self._expr_translator).to_reg("%rax", self._emitter)
-        self._emitter.emit("cmpq    $0, %rax")
+        test = stmt.test.accept(self._expr_translator)
+        arg = test.load_arg("%rax", False, self._emitter)
+        self._emitter.emit(f"cmpq    $0, {arg}")
         self._emitter.emit(f"je      {neg}")
         self._frame.new_region()
         self.translate(stmt.pos)
@@ -326,16 +326,14 @@ class Frame:
             emitter.emit(f"subq    ${size}, %rsp")
         return self._offset
 
-    def free(self, size: int, emitter: "AsmEmitter") -> None:
-        if size > 0:
-            emitter.emit(f"addq    ${size}, %rsp")
-
     def new_region(self) -> None:
         self._next.append((self._offset, self._offsets))
 
     def free_region(self, emitter: "AsmEmitter") -> None:
         offset, self._offsets = self._next.pop()
-        self.free(offset - self._offset, emitter)
+        size = offset - self._offset
+        if size > 0:
+            emitter.emit(f"addq    ${size}, %rsp")
         self._offset = offset
 
     def shadow(self, shadow: int, emitter: "AsmEmitter") -> None:
@@ -343,7 +341,10 @@ class Frame:
         emitter.emit(f"subq    ${shadow}, %rsp")
 
     def leave(self, emitter: "AsmEmitter") -> None:
-        self.free(-self._offset + self._shadow, emitter)
+        if self._offset == 0 and self._shadow == 0:
+            emitter.emit("popq    %rbp")
+        else:
+            emitter.emit("leave")
 
 
 @dataclass
