@@ -225,21 +225,19 @@ class ExprTranslator(ExprVisitor[Value]):
 
     def visit_call(self, expr: Call) -> Value:
         self._frame.new_region()
-        regs = len(self._cc.registers)
         slots = self._frame.allocate_args(
             len(expr.args), self._cc, self._emitter)
-        tos: list[tuple[str, Value]] = []
-        for i, arg in enumerate(expr.args):
-            val = arg.accept(self)
-            if i >= regs:
-                val.to_mem(slots[i - regs], self._emitter)
-            elif i == len(expr.args)-1:
-                val.to_reg(self._cc.registers[i], self._emitter)
+        regs = len(self._cc.registers)
+        tos: list[Value] = []
+        for i, arg in enumerate(expr.args[:regs]):
+            if i == len(expr.args) - 1:
+                arg.accept(self).to_reg(self._cc.registers[i], self._emitter)
             else:
-                tos.append(
-                    (self._cc.registers[i], val.store_tmp(self._emitter)))
-        for reg, val in reversed(tos):
-            val.to_reg(reg, self._emitter)
+                tos.append(arg.accept(self).store_tmp(self._emitter))
+        for i, arg in enumerate(expr.args[regs:]):
+            arg.accept(self).to_mem(slots[i], self._emitter)
+        for i, val in reversed(list(enumerate(tos))):
+            val.to_reg(self._cc.registers[i], self._emitter)
         self._emitter.emit(f"call    {expr.name}")
         self._frame.free_region(self._emitter)
         return Reg()
