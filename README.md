@@ -42,10 +42,8 @@ fac:
     imulq   %rcx
     leave
     ret
-    jmp     l1
 l0:
     movq    $1, %rax
     leave
     ret
-l1:
 ```

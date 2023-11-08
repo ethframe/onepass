@@ -71,7 +71,7 @@ class ExprVisitor(Generic[T]):
 
 
 class Stmt:
-    def accept(self, visitor: "StmtVisitor") -> None:
+    def accept(self, visitor: "StmtVisitor[T]") -> T:
         raise NotImplementedError()
 
 
@@ -80,16 +80,16 @@ class Assign(Stmt):
     name: str
     expr: Expr
 
-    def accept(self, visitor: "StmtVisitor") -> None:
-        visitor.visit_assign(self)
+    def accept(self, visitor: "StmtVisitor[T]") -> T:
+        return visitor.visit_assign(self)
 
 
 @dataclass
 class Return(Stmt):
     expr: Expr
 
-    def accept(self, visitor: "StmtVisitor") -> None:
-        visitor.visit_return(self)
+    def accept(self, visitor: "StmtVisitor[T]") -> T:
+        return visitor.visit_return(self)
 
 
 @dataclass
@@ -98,18 +98,18 @@ class If(Stmt):
     pos: list[Stmt]
     neg: list[Stmt]
 
-    def accept(self, visitor: "StmtVisitor") -> None:
-        visitor.visit_if(self)
+    def accept(self, visitor: "StmtVisitor[T]") -> T:
+        return visitor.visit_if(self)
 
 
-class StmtVisitor:
-    def visit_assign(self, stmt: Assign) -> None:
+class StmtVisitor(Generic[T]):
+    def visit_assign(self, stmt: Assign) -> T:
         raise NotImplementedError()
 
-    def visit_return(self, stmt: Return) -> None:
+    def visit_return(self, stmt: Return) -> T:
         raise NotImplementedError()
 
-    def visit_if(self, stmt: If) -> None:
+    def visit_if(self, stmt: If) -> T:
         raise NotImplementedError()
 
 
@@ -243,7 +243,7 @@ class ExprTranslator(ExprVisitor[Value]):
         return Reg()
 
 
-class Translator(StmtVisitor):
+class Translator(StmtVisitor[bool]):
     def __init__(
             self, convention: "CallingConvention", frame: "Frame",
             emitter: "AsmEmitter"):
@@ -252,23 +252,27 @@ class Translator(StmtVisitor):
         self._emitter = emitter
         self._expr_translator = ExprTranslator(convention, frame, emitter)
 
-    def translate(self, stmts: list[Stmt]) -> None:
+    def translate(self, stmts: list[Stmt]) -> bool:
         for stmt in stmts:
-            stmt.accept(self)
+            if stmt.accept(self):
+                return True
+        return False
 
-    def visit_assign(self, stmt: Assign) -> None:
+    def visit_assign(self, stmt: Assign) -> bool:
         if not self._frame.is_defined(stmt.name):
             self._frame.define_var(
                 stmt.name, self._frame.allocate(8, self._emitter))
         offset = self._frame.get_offset(stmt.name)
         stmt.expr.accept(self._expr_translator).to_mem(offset, self._emitter)
+        return False
 
-    def visit_return(self, stmt: Return) -> None:
+    def visit_return(self, stmt: Return) -> bool:
         stmt.expr.accept(self._expr_translator).to_reg("%rax", self._emitter)
         self._frame.leave(self._emitter)
         self._emitter.emit("ret")
+        return True
 
-    def visit_if(self, stmt: If) -> None:
+    def visit_if(self, stmt: If) -> bool:
         neg = self._emitter.get_label()
         end = self._emitter.get_label()
         test = stmt.test.accept(self._expr_translator)
@@ -276,14 +280,17 @@ class Translator(StmtVisitor):
         self._emitter.emit(f"cmpq    $0, {arg}")
         self._emitter.emit(f"je      {neg}")
         self._frame.new_region()
-        self.translate(stmt.pos)
+        pos_ret = self.translate(stmt.pos)
         self._frame.free_region(self._emitter)
-        self._emitter.emit(f"jmp     {end}")
+        if not pos_ret:
+            self._emitter.emit(f"jmp     {end}")
         self._emitter.emit(f"{neg}:", indent=False)
         self._frame.new_region()
-        self.translate(stmt.neg)
+        neg_ret = self.translate(stmt.neg)
         self._frame.free_region(self._emitter)
-        self._emitter.emit(f"{end}:", indent=False)
+        if not pos_ret:
+            self._emitter.emit(f"{end}:", indent=False)
+        return pos_ret and neg_ret
 
 
 class Frame:
