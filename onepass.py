@@ -226,17 +226,13 @@ class ExprTranslator(ExprVisitor[Value]):
     def visit_call(self, expr: Call) -> Value:
         self._frame.new_region()
         regs = len(self._cc.registers)
-        slots: list[int] = []
-        if len(expr.args) > regs:
-            self._frame.adjust(
-                self._cc.alignment, 8 * (len(expr.args) - regs), self._emitter)
-            for _ in range(len(expr.args) - regs):
-                slots.append(self._frame.allocate(8, self._emitter))
+        slots = self._frame.allocate_args(
+            len(expr.args), self._cc, self._emitter)
         tos: list[tuple[str, Value]] = []
         for i, arg in enumerate(expr.args):
             val = arg.accept(self)
             if i >= regs:
-                val.to_mem(slots[len(expr.args) - i - 1], self._emitter)
+                val.to_mem(slots[i - regs], self._emitter)
             elif i == len(expr.args)-1:
                 val.to_reg(self._cc.registers[i], self._emitter)
             else:
@@ -314,17 +310,20 @@ class Frame:
                 return offsets[name]
         raise RuntimeError(f"undefined variable {name}")
 
-    def adjust(self, size: int, alignment: int, emitter: "AsmEmitter") -> None:
-        if alignment > 0:
-            offset = alignment + (self._offset - size) % alignment
-            emitter.emit(f"subq    ${offset}, %rsp")
-            self._offset -= offset
-
     def allocate(self, size: int, emitter: "AsmEmitter") -> int:
         if size > 0:
             self._offset -= size
             emitter.emit(f"subq    ${size}, %rsp")
         return self._offset
+
+    def allocate_args(
+            self, args: int, cc: "CallingConvention",
+            emitter: "AsmEmitter") -> list[int]:
+        size = stack = 8 * max(args - len(cc.registers), 0)
+        if cc.alignment > 0:
+            size += (self._offset - size) % cc.alignment
+        offset = self.allocate(size, emitter)
+        return [slot for slot in range(offset, offset + stack, 8)]
 
     def new_region(self) -> None:
         self._next.append((self._offset, self._offsets))
