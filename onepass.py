@@ -156,13 +156,16 @@ class Imm(Value):
         return super().load_arg(reg, allow_imm, emitter)
 
 
+@dataclass
 class Reg(Value):
+    value: str
+
     def to_reg(self, reg: str, emitter: "AsmEmitter") -> None:
-        if reg != "%rax":
-            emitter.emit(f"movq    %rax, {reg}")
+        if reg != self.value:
+            emitter.emit(f"movq    {self.value}, {reg}")
 
     def to_mem(self, offset: int, emitter: "AsmEmitter") -> None:
-        emitter.emit(f"movq    %rax, {offset}(%rbp)")
+        emitter.emit(f"movq    {self.value}, {offset}(%rbp)")
 
     def store_tmp(self, frame: "Frame", emitter: "AsmEmitter") -> "Value":
         offset = frame.allocate(8, emitter)
@@ -198,7 +201,7 @@ class ExprTranslator(ExprVisitor[Value]):
         return Imm(expr.value)
 
     def visit_bin_op(self, expr: BinOp) -> Value:
-        self._frame.new_region()
+        self._frame.new_scope()
         lhs = expr.lhs.accept(self).store_tmp(self._frame, self._emitter)
         imm = expr.kind == BinOpKind.add or expr.kind == BinOpKind.sub
         rhs = expr.rhs.accept(self).load_arg("%rcx", imm, self._emitter)
@@ -212,14 +215,14 @@ class ExprTranslator(ExprVisitor[Value]):
         elif expr.kind == BinOpKind.div:
             self._emitter.emit("movq    $0, %rdx")
             self._emitter.emit(f"idivq   {rhs}")
-        self._frame.free_region(self._emitter)
-        return Reg()
+        self._frame.free_scope(self._emitter)
+        return Reg("%rax")
 
     def visit_var(self, expr: Var) -> Value:
         return Mem(self._frame.get_offset(expr.name))
 
     def visit_call(self, expr: Call) -> Value:
-        self._frame.new_region()
+        self._frame.new_scope()
         slots = self._frame.allocate_args(
             len(expr.args), self._cc, self._emitter)
         regs = len(self._cc.registers)
@@ -235,8 +238,8 @@ class ExprTranslator(ExprVisitor[Value]):
         for i, val in reversed(list(enumerate(tos))):
             val.to_reg(self._cc.registers[i], self._emitter)
         self._emitter.emit(f"call    {expr.name}")
-        self._frame.free_region(self._emitter)
-        return Reg()
+        self._frame.free_scope(self._emitter)
+        return Reg("%rax")
 
 
 class Translator(StmtVisitor[bool]):
@@ -264,8 +267,7 @@ class Translator(StmtVisitor[bool]):
 
     def visit_return(self, stmt: Return) -> bool:
         stmt.expr.accept(self._expr_translator).to_reg("%rax", self._emitter)
-        self._frame.leave(self._emitter)
-        self._emitter.emit("ret")
+        self._frame.epilogue(self._emitter)
         return True
 
     def visit_if(self, stmt: If) -> bool:
@@ -275,22 +277,23 @@ class Translator(StmtVisitor[bool]):
         arg = test.load_arg("%rax", False, self._emitter)
         self._emitter.emit(f"cmpq    $0, {arg}")
         self._emitter.emit(f"je      {neg}")
-        self._frame.new_region()
+        self._frame.new_scope()
         pos_ret = self.translate(stmt.pos)
-        self._frame.free_region(self._emitter)
+        self._frame.free_scope(self._emitter)
         if not pos_ret:
             self._emitter.emit(f"jmp     {end}")
         self._emitter.emit(f"{neg}:", indent=False)
-        self._frame.new_region()
+        self._frame.new_scope()
         neg_ret = self.translate(stmt.neg)
-        self._frame.free_region(self._emitter)
+        self._frame.free_scope(self._emitter)
         if not pos_ret:
             self._emitter.emit(f"{end}:", indent=False)
         return pos_ret and neg_ret
 
 
 class Frame:
-    def __init__(self) -> None:
+    def __init__(self, cc: "CallingConvention") -> None:
+        self._cc = cc
         self._offset = 0
         self._offsets: dict[str, int] = {}
         self._next: list[tuple[int, dict[str, int]]] = []
@@ -326,25 +329,40 @@ class Frame:
         offset = self.allocate(size, emitter)
         return [slot for slot in range(offset, offset + stack, 8)]
 
-    def new_region(self) -> None:
+    def new_scope(self) -> None:
         self._next.append((self._offset, self._offsets))
 
-    def free_region(self, emitter: "AsmEmitter") -> None:
+    def free_scope(self, emitter: "AsmEmitter") -> None:
         offset, self._offsets = self._next.pop()
         size = offset - self._offset
         if size > 0:
             emitter.emit(f"addq    ${size}, %rsp")
         self._offset = offset
 
-    def shadow(self, shadow: int, emitter: "AsmEmitter") -> None:
-        self._shadow += shadow
-        emitter.emit(f"subq    ${shadow}, %rsp")
+    def prologue(self, args: list[str], emitter: "AsmEmitter") -> None:
+        emitter.emit("pushq   %rbp")
+        emitter.emit("movq    %rsp, %rbp")
 
-    def leave(self, emitter: "AsmEmitter") -> None:
+        regs = len(self._cc.registers)
+        if self._cc.shadow:
+            self._shadow = 8 * regs
+            emitter.emit(f"subq    ${self._shadow}, %rsp")
+        else:
+            self.allocate(8 * min(regs, len(args)), emitter)
+
+        for i, name in enumerate(args):
+            offset = self._cc.get_offset(i)
+            self.define_var(name, offset)
+            reg = self._cc.get_register(i)
+            if reg is not None:
+                emitter.emit(f"movq    {reg}, {offset}(%rbp)")
+
+    def epilogue(self, emitter: "AsmEmitter") -> None:
         if self._offset == 0 and self._shadow == 0:
             emitter.emit("popq    %rbp")
         else:
             emitter.emit("leave")
+        emitter.emit("ret")
 
 
 @dataclass
@@ -406,30 +424,9 @@ def translate_func(
     emitter.emit(f".global {func.name}", indent=False)
     emitter.emit(f"{func.name}:", indent=False)
 
-    emitter.emit("pushq   %rbp")
-    emitter.emit("movq    %rsp, %rbp")
-
-    frame = create_frame(func.args, emitter, cc)
-
+    frame = Frame(cc)
     translator = Translator(cc, frame, emitter)
-    for stmt in func.body:
-        stmt.accept(translator)
 
-
-def create_frame(
-        args: list[str], emitter: AsmEmitter, cc: CallingConvention) -> Frame:
-    frame = Frame()
-
-    if cc.shadow:
-        frame.shadow(8 * len(cc.registers), emitter)
-    else:
-        frame.allocate(8 * min(len(cc.registers), len(args)), emitter)
-
-    for i, name in enumerate(args):
-        offset = cc.get_offset(i)
-        frame.define_var(name, offset)
-        reg = cc.get_register(i)
-        if reg is not None:
-            emitter.emit(f"movq    {reg}, {offset}(%rbp)")
-
-    return frame
+    frame.prologue(func.args, emitter)
+    if not translator.translate(func.body):
+        frame.epilogue(emitter)
