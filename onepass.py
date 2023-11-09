@@ -132,7 +132,7 @@ class Value:
     def to_mem(self, offset: int, emitter: "AsmEmitter") -> None:
         raise NotImplementedError()
 
-    def store_tmp(self, emitter: "AsmEmitter") -> "Value":
+    def store_tmp(self, frame: "Frame", emitter: "AsmEmitter") -> "Value":
         return self
 
     def load_arg(self, reg: str, allow_imm: bool, emitter: "AsmEmitter") -> str:
@@ -164,9 +164,10 @@ class Reg(Value):
     def to_mem(self, offset: int, emitter: "AsmEmitter") -> None:
         emitter.emit(f"movq    %rax, {offset}(%rbp)")
 
-    def store_tmp(self, emitter: "AsmEmitter") -> "Value":
-        emitter.emit("pushq   %rax")
-        return Tos()
+    def store_tmp(self, frame: "Frame", emitter: "AsmEmitter") -> "Value":
+        offset = frame.allocate(8, emitter)
+        self.to_mem(offset, emitter)
+        return Mem(offset)
 
 
 @dataclass
@@ -185,14 +186,6 @@ class Mem(Value):
         return f"{self.offset}(%rbp)"
 
 
-class Tos(Value):
-    def to_reg(self, reg: str, emitter: "AsmEmitter") -> None:
-        emitter.emit(f"popq    {reg}")
-
-    def to_mem(self, offset: int, emitter: "AsmEmitter") -> None:
-        emitter.emit(f"popq    {offset}(%rbp)")
-
-
 class ExprTranslator(ExprVisitor[Value]):
     def __init__(
             self, cc: "CallingConvention", frame: "Frame",
@@ -205,7 +198,8 @@ class ExprTranslator(ExprVisitor[Value]):
         return Imm(expr.value)
 
     def visit_bin_op(self, expr: BinOp) -> Value:
-        lhs = expr.lhs.accept(self).store_tmp(self._emitter)
+        self._frame.new_region()
+        lhs = expr.lhs.accept(self).store_tmp(self._frame, self._emitter)
         imm = expr.kind == BinOpKind.add or expr.kind == BinOpKind.sub
         rhs = expr.rhs.accept(self).load_arg("%rcx", imm, self._emitter)
         lhs.to_reg("%rax", self._emitter)
@@ -218,6 +212,7 @@ class ExprTranslator(ExprVisitor[Value]):
         elif expr.kind == BinOpKind.div:
             self._emitter.emit("movq    $0, %rdx")
             self._emitter.emit(f"idivq   {rhs}")
+        self._frame.free_region(self._emitter)
         return Reg()
 
     def visit_var(self, expr: Var) -> Value:
@@ -230,10 +225,11 @@ class ExprTranslator(ExprVisitor[Value]):
         regs = len(self._cc.registers)
         tos: list[Value] = []
         for i, arg in enumerate(expr.args[:regs]):
+            val = arg.accept(self)
             if i == len(expr.args) - 1:
-                arg.accept(self).to_reg(self._cc.registers[i], self._emitter)
+                val.to_reg(self._cc.registers[i], self._emitter)
             else:
-                tos.append(arg.accept(self).store_tmp(self._emitter))
+                tos.append(val.store_tmp(self._frame, self._emitter))
         for i, arg in enumerate(expr.args[regs:]):
             arg.accept(self).to_mem(slots[i], self._emitter)
         for i, val in reversed(list(enumerate(tos))):

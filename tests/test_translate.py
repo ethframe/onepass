@@ -51,6 +51,20 @@ TEST_CASES = [
             ]))
         ]),
     ]), [1, 2, 3, 4, 5, 6, 7], 7),
+    (Program([
+        Func("_g", ["a", "b", "c", "d", "e", "f", "g"], [
+            Return(Var("g"))
+        ]),
+        Func("_fn", ["a", "b", "c", "d", "e", "f", "g"], [
+            Return(BinOp(BinOpKind.add, BinOp(
+                BinOpKind.add, Var("b"), Var("c")),
+                Call("_g", [
+                    Var("a"), Var("b"), Var("c"), Var("d"),
+                    Var("e"), Var("f"), Var("g")
+                ])
+            ))
+        ]),
+    ]), [1, 2, 3, 4, 5, 6, 7], 12),
     (Program([Func("_fn", ["x"], [
         Assign("x", BinOp(BinOpKind.add, Var("x"), Int(1))),
         Return(Var("x"))
