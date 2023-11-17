@@ -1,10 +1,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from io import StringIO
-
-
 from typing import Generic, TypeVar
-
 
 T = TypeVar("T")
 
@@ -201,7 +198,7 @@ class ExprTranslator(ExprVisitor[Value]):
         return Imm(expr.value)
 
     def visit_bin_op(self, expr: BinOp) -> Value:
-        self._frame.new_scope()
+        self._frame.enter_scope()
         lhs = expr.lhs.accept(self).store_tmp(self._frame, self._emitter)
         imm = expr.kind == BinOpKind.add or expr.kind == BinOpKind.sub
         rhs = expr.rhs.accept(self).load_arg("%rcx", imm, self._emitter)
@@ -215,16 +212,15 @@ class ExprTranslator(ExprVisitor[Value]):
         elif expr.kind == BinOpKind.div:
             self._emitter.emit("movq    $0, %rdx")
             self._emitter.emit(f"idivq   {rhs}")
-        self._frame.free_scope(self._emitter)
+        self._frame.exit_scope(self._emitter)
         return Reg("%rax")
 
     def visit_var(self, expr: Var) -> Value:
         return Mem(self._frame.get_offset(expr.name))
 
     def visit_call(self, expr: Call) -> Value:
-        self._frame.new_scope()
-        slots = self._frame.allocate_args(
-            len(expr.args), self._cc, self._emitter)
+        self._frame.enter_scope()
+        slots = self._frame.allocate_args(len(expr.args), self._emitter)
         regs = len(self._cc.registers)
         tos: list[Value] = []
         for i, arg in enumerate(expr.args[:regs]):
@@ -238,7 +234,7 @@ class ExprTranslator(ExprVisitor[Value]):
         for i, val in reversed(list(enumerate(tos))):
             val.to_reg(self._cc.registers[i], self._emitter)
         self._emitter.emit(f"call    {expr.name}")
-        self._frame.free_scope(self._emitter)
+        self._frame.exit_scope(self._emitter)
         return Reg("%rax")
 
 
@@ -277,15 +273,15 @@ class Translator(StmtVisitor[bool]):
         arg = test.load_arg("%rax", False, self._emitter)
         self._emitter.emit(f"cmpq    $0, {arg}")
         self._emitter.emit(f"je      {neg}")
-        self._frame.new_scope()
+        self._frame.enter_scope()
         pos_ret = self.translate(stmt.pos)
-        self._frame.free_scope(self._emitter)
+        self._frame.exit_scope(self._emitter)
         if not pos_ret:
             self._emitter.emit(f"jmp     {end}")
         self._emitter.emit(f"{neg}:", indent=False)
-        self._frame.new_scope()
+        self._frame.enter_scope()
         neg_ret = self.translate(stmt.neg)
-        self._frame.free_scope(self._emitter)
+        self._frame.exit_scope(self._emitter)
         if not pos_ret:
             self._emitter.emit(f"{end}:", indent=False)
         return pos_ret and neg_ret
@@ -320,19 +316,18 @@ class Frame:
             emitter.emit(f"subq    ${size}, %rsp")
         return self._offset
 
-    def allocate_args(
-            self, args: int, cc: "CallingConvention",
-            emitter: "AsmEmitter") -> list[int]:
-        size = stack = 8 * max(args - len(cc.registers), 0)
-        if cc.alignment > 0:
-            size += (self._offset - size) % cc.alignment
+    def allocate_args(self, args: int, emitter: "AsmEmitter") -> list[int]:
+        size = stack = 8 * max(args - len(self._cc.registers), 0)
+        if self._cc.alignment > 0:
+            size += (self._offset - size) % self._cc.alignment
         offset = self.allocate(size, emitter)
         return [slot for slot in range(offset, offset + stack, 8)]
 
-    def new_scope(self) -> None:
+    def enter_scope(self) -> None:
         self._next.append((self._offset, self._offsets))
+        self._offsets = {}
 
-    def free_scope(self, emitter: "AsmEmitter") -> None:
+    def exit_scope(self, emitter: "AsmEmitter") -> None:
         offset, self._offsets = self._next.pop()
         size = offset - self._offset
         if size > 0:
