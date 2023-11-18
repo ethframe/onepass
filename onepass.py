@@ -186,13 +186,19 @@ class Mem(Value):
         return f"{self.offset}(%rbp)"
 
 
-class ExprTranslator(ExprVisitor[Value]):
+class Translator(StmtVisitor[bool], ExprVisitor[Value]):
     def __init__(
             self, cc: "CallingConvention", frame: "Frame",
             emitter: "AsmEmitter"):
         self._cc = cc
         self._frame = frame
         self._emitter = emitter
+
+    def translate(self, stmts: list[Stmt]) -> bool:
+        for stmt in stmts:
+            if stmt.accept(self):
+                return True
+        return False
 
     def visit_int(self, expr: Int) -> Value:
         return Imm(expr.value)
@@ -237,39 +243,23 @@ class ExprTranslator(ExprVisitor[Value]):
         self._frame.exit_scope(self._emitter)
         return Reg("%rax")
 
-
-class Translator(StmtVisitor[bool]):
-    def __init__(
-            self, convention: "CallingConvention", frame: "Frame",
-            emitter: "AsmEmitter"):
-        self._convention = convention
-        self._frame = frame
-        self._emitter = emitter
-        self._expr_translator = ExprTranslator(convention, frame, emitter)
-
-    def translate(self, stmts: list[Stmt]) -> bool:
-        for stmt in stmts:
-            if stmt.accept(self):
-                return True
-        return False
-
     def visit_assign(self, stmt: Assign) -> bool:
         if not self._frame.is_defined(stmt.name):
             self._frame.define_var(
                 stmt.name, self._frame.allocate(8, self._emitter))
         offset = self._frame.get_offset(stmt.name)
-        stmt.expr.accept(self._expr_translator).to_mem(offset, self._emitter)
+        stmt.expr.accept(self).to_mem(offset, self._emitter)
         return False
 
     def visit_return(self, stmt: Return) -> bool:
-        stmt.expr.accept(self._expr_translator).to_reg("%rax", self._emitter)
+        stmt.expr.accept(self).to_reg("%rax", self._emitter)
         self._frame.epilogue(self._emitter)
         return True
 
     def visit_if(self, stmt: If) -> bool:
         neg = self._emitter.get_label()
         end = self._emitter.get_label()
-        test = stmt.test.accept(self._expr_translator)
+        test = stmt.test.accept(self)
         arg = test.load_arg("%rax", False, self._emitter)
         self._emitter.emit(f"cmpq    $0, {arg}")
         self._emitter.emit(f"je      {neg}")
