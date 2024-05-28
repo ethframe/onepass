@@ -227,6 +227,7 @@ class Translator(StmtVisitor[bool], ExprVisitor[Value]):
     def visit_call(self, expr: Call) -> Value:
         self._frame.enter_scope()
         slots = self._frame.allocate_args(len(expr.args), self._emitter)
+        self._frame.enter_scope()
         regs = len(self._cc.registers)
         tos: list[Value] = []
         for i, arg in enumerate(expr.args[:regs]):
@@ -239,6 +240,7 @@ class Translator(StmtVisitor[bool], ExprVisitor[Value]):
             arg.accept(self).to_mem(slots[i], self._emitter)
         for i, val in reversed(list(enumerate(tos))):
             val.to_reg(self._cc.registers[i], self._emitter)
+        self._frame.exit_scope(self._emitter)
         self._emitter.emit(f"call    {expr.name}")
         self._frame.exit_scope(self._emitter)
         return Reg("%rax")
